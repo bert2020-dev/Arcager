@@ -1,4 +1,4 @@
-# arcager
+# Arcager
 
 **Single-file HTML packer.** Bundle a page — or an entire static site — into one portable `.html` that unpacks itself in the browser. Optionally encrypt it, attach media, or hide arbitrary files inside an encrypted payload.
 
