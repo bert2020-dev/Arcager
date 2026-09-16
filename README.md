@@ -19,9 +19,6 @@
 
 The result is one file you can email, host, drop on a USB stick, or serve from anywhere. No server required.
 
-> [!NOTE]
-> On-disk format is compatible with the original `arcager.js`. Files packed by one can be unpacked by the other.
-
 ---
 
 ## Table of Contents
@@ -62,7 +59,7 @@ Optional dependencies, only needed for specific features:
 
 ```bash
 pip install cryptography      # for -E (payload encryption) and encrypted -u / -x
-pip install brotli            # for --brotli
+pip install brotli            # for --brotli compression
 npm install -g terser         # for -m / --minify (JS squeeze only)
 ```
 
@@ -251,7 +248,7 @@ Already-compressed files (PNG, JPEG, MP4, ZIP, 7z, WOFF2, PDF, DOCX, …) are **
 
 ## Examples
 
-### Deliver a password-protected report to a client
+### Deliver a password-protected report to a client with Chrome browser
 
 ```bash
 python arcager.py -E --brotli -m \
@@ -261,21 +258,21 @@ python arcager.py -E --brotli -m \
 
 The client opens `packed_q3_report.html`, gets a password prompt, enters the password you shared out of band, and sees the report.
 
-### Bundle a static site into one file
+### Bundle a static site into one file (with directory recursion)
 
 ```bash
-python arcager.py --merge ./docs --brotli -m
+python arcager.py -r --merge ./docs -m
 ```
 
 Scans `./docs/`, finds `./docs/index.html`, inlines local CSS, JS, fonts, images and icons, and writes `packed_docs.html` alongside the `docs/` folder. Review the merge report to see what could not be flattened.
 
-### Bundle a page with a folder of flags
+### Bundle a page with a folder containing country flag images
 
 ```bash
-python arcager.py -a ./flags page.html
+python arcager.py -a ./country_flags page.html
 ```
 
-Every image in `./flags` becomes available at runtime. A reference like `<img src="flags/ge.png">` in `page.html` is rewritten to the in-memory attachment.
+Every image in `./country_flags` becomes available at runtime. A reference like `<img src="country_flags/ge.png">` in `page.html` is rewritten to the in-memory attachment.
 
 ```javascript
 await arcager.ready;
@@ -343,10 +340,11 @@ Large base64 PNGs and JPEGs are hoisted into the binary blob. Tiny SVGs and GIFs
 
 ### Compression
 ```
---brotli                Use Brotli instead of gzip (Chrome 105+).
--m, --minify [lossy]    Minify the unpacker JS and strip HTML comments.
-                        Add 'lossy' to also collapse inter-tag whitespace
-                        and remove sourceMappingURL comments. Lossy.
+--brotli                Use Brotli instead of gzip (Chrome 105+ only).
+-m, --minify [lossy]    Minify the unpacker JS and the payload before
+                        compressing. Add 'lossy' to also collapse
+                        inter-tag whitespace, remove sourceMappingURL
+                        code comments. It's lossy. (requires Terser)
 --ignore-uris LIST      Comma-separated MIME prefixes to KEEP as data:
                         URIs rather than hoist.
 ```
@@ -493,6 +491,6 @@ Third-party libraries used at runtime (`cryptography`, `brotli`, `terser`) keep 
 
 ## Credits
 
-`arcager` is a Python port of the original `arcager.js` by the same author. Both implementations produce the same on-disk format; use whichever fits your stack.
+`arcager` is a Python port of the original `arcager.js` by the same author. Only the python version is actively maintained at the moment.
 
 **See also:** [`LICENSE.txt`](LICENSE.txt)
