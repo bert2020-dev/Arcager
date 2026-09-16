@@ -14,10 +14,20 @@
 - The original HTML, compressed with gzip or Brotli.
 - Embedded `data:` URIs, hoisted into a separate binary blob so they don't inflate the page.
 - A tiny inline JavaScript unpacker that reassembles everything at load time using the browser's built-in `DecompressionStream`.
-- Optional **visible attachments** (images, fonts, audio, video, documents) exposed to the page as `arcager.images`.
+- Optional **visible bundles** (images, fonts, audio, video, documents) exposed to the page as `arcager.images`.
 - Optional **hidden encrypted payloads** that the browser never touches.
 
 The result is one file you can email, host, drop on a USB stick, or serve from anywhere. No server required.
+
+**Version 3.1.0** changes from earlier releases:
+
+- `-b` / `--bundle` replaces `-a` / `--attach`.
+- `--bundle-password` replaces `--attach-password`.
+- `--prefix PREFIX` customizes pack/merge output names (default: `packed_`).
+- `-l` and `-x` accept comma-separated type lists (e.g. `images,videos`).
+- Multiple `-b` flags accumulate; visible and hidden can be mixed freely.
+- Minify no longer strips HTML comments by default; use `-m lossy` for that.
+- Encrypted zip archives are detected and refused, with a hint to use hidden bundling.
 
 ---
 
@@ -27,7 +37,7 @@ The result is one file you can email, host, drop on a USB stick, or serve from a
 - [Installation](#installation)
 - [Quick Start](#quick-start)
 - [Command Modes](#command-modes)
-- [Attachments](#attachments)
+- [Bundles](#bundles)
 - [Encryption](#encryption)
 - [Compression](#compression)
 - [Examples](#examples)
@@ -91,11 +101,11 @@ python arcager.py --brotli -m lossy report.html
 # Encrypt with a password (browser prompts before unpacking)
 python arcager.py -E report.html
 
-# Attach a folder of images; <img src="flags/ge.png"> is auto-rewired
-python arcager.py -a ./flags page.html
+# Bundle a folder of images; <img src="flags/ge.png"> is auto-rewired
+python arcager.py -b ./flags page.html
 
 # Hide any file inside a normal-looking cover page
-python arcager.py -a secret.zip hidden cover.html
+python arcager.py -b secret.zip hidden cover.html
 
 # Merge a whole static site into one file
 python arcager.py --merge ./docs --brotli -m
@@ -118,11 +128,11 @@ python arcager.py -x pack -O ./out packed_cover.html
 
 | Mode | Command | Purpose |
 |---|---|---|
-| **pack** | `arcager [options] <input...>` | Pack HTML files into `packed_<name>.html`. |
+| **pack** | `arcager [options] <input...>` | Pack HTML files into `packed_<name>.html` (or custom `--prefix`). |
 | **unpack** | `arcager -u [options] <input...>` | Reverse a packed file back to HTML. Byte-exact for non-lossy packings. |
 | **merge** | `arcager --merge <dir> [options]` | Flatten a whole directory (entry point `index.html`) into one file. |
-| **list** | `arcager -l [TYPE] <input...>` | List media inside a packed or unpacked HTML file. No password needed. |
-| **extract** | `arcager -x [TYPE] <input...> [-O DIR]` | Extract media into an output directory. Prompts for passwords as needed. |
+| **list** | `arcager -l [TYPE,...] <input...>` | List media inside a packed or unpacked HTML file. No password needed. |
+| **extract** | `arcager -x [TYPE,...] <input...> [-O DIR]` | Extract media into an output directory. Prompts for passwords as needed. |
 
 ### `-l` / `-x` types
 
@@ -130,16 +140,18 @@ python arcager.py -x pack -O ./out packed_cover.html
 |---|---|
 | `all` | Everything (default) |
 | `media` | Hoisted `data:` URIs from the payload HTML |
-| `pack` | Attachments — visible *and* hidden |
+| `pack` | Bundles — visible *and* hidden |
 | `images` `videos` `audio` `fonts` `docs` | Filter by category (works across media + pack) |
+
+Types can be comma-separated, e.g. `-l images,videos` or `-x pack,docs`.
 
 ---
 
-## Attachments
+## Bundles
 
-`-a PATH [hidden]` adds files to the bundle. Can be given multiple times. Visible and hidden attachments can be mixed in the same pack.
+`-b PATH [hidden]` (or `--bundle`) adds files to the bundle. It can be given multiple times. Visible and hidden bundles can be mixed in the same pack.
 
-### Visible attachments — `-a PATH`
+### Visible bundles — `-b PATH`
 
 Media is decompressed in the browser and exposed to your page as `arcager.images`. Your HTML's `src`/`href`/`poster`/`srcset`/CSS `url(...)` references are auto-rewired at load time.
 
@@ -160,6 +172,8 @@ Media is decompressed in the browser and exposed to your page as `arcager.images
 
 Total uncompressed cap: **128 MB**.
 
+Encrypted zip archives are refused; decrypt them first, or use hidden bundling (`-b archive.zip hidden`).
+
 </details>
 
 ### Runtime API
@@ -173,13 +187,13 @@ arcager.getImage('ge')          // returns an HTMLImageElement
 arcager.getImage('flags/ge')
 ```
 
-Keys are the file's relative path with the extension stripped, using forward slashes. When a bare basename is unique across the whole attachment set, a short alias is added (so `'ge'` works when there is only one `ge.png` anywhere). Ambiguous aliases are dropped.
+Keys are the file's relative path with the extension stripped, using forward slashes. When a bare basename is unique across the whole bundle set, a short alias is added (so `'ge'` works when there is only one `ge.png` anywhere). Ambiguous aliases are dropped.
 
 HTML/PDF/XHTML files inside an archive are exposed as `blob:` URLs so they can be loaded inside `<iframe>` elements.
 
-When `-E` is used, visible attachments are encrypted with the payload password so the entire bundle stays opaque.
+When `-E` is used, visible bundles are encrypted with the payload password so the entire bundle stays opaque.
 
-### Hidden attachments — `-a PATH hidden`
+### Hidden bundles — `-b PATH hidden`
 
 The file (or folder) is stored as an opaque, encrypted blob the browser-side loader never touches. No runtime API. Extract with:
 
@@ -187,12 +201,12 @@ The file (or folder) is stored as an opaque, encrypted blob the browser-side loa
 python arcager.py -x pack -O ./out packed_cover.html
 ```
 
-Accepted inputs: **any** file, **any** folder (zipped in memory at pack time), or any of the same archives. Total uncompressed cap: **512 MB**.
+Accepted inputs: **any** file, **any** folder (zipped in memory at pack time), or any of the same archives. No type restriction. Total uncompressed payload cap: **512 MB**.
 
-Hidden attachments use their own password, independent from the payload password. If both `-E` and `-a ... hidden` are used, the script prompts twice — clearly labelled **"Payload password"** and **"Attachment password"**.
+Hidden bundles use their own password, independent from the payload password. If both `-E` and `-b ... hidden` are used, the script prompts twice — clearly labelled **"Payload password"** and **"Bundle password"**.
 
 > [!TIP]
-> Because hidden attachments are encrypted with an attachment password and can coexist with any pack output, they're useful for exchanging secret files between consenting parties: the cover page loads cleanly for anyone, and only those with the attachment password can extract the payload.
+> Because hidden bundles are encrypted with a bundle password and can coexist with any pack output, they're useful for exchanging secret files between consenting parties: the cover page loads cleanly for anyone, and only those with the bundle password can extract the payload.
 
 ---
 
@@ -202,22 +216,22 @@ Hidden attachments use their own password, independent from the payload password
 # Payload encryption (browser prompts on load)
 python arcager.py -E report.html
 
-# Attachment encryption (extracted later with -x pack)
-python arcager.py -a secret.zip hidden cover.html
+# Bundle encryption (extracted later with -x pack)
+python arcager.py -b secret.zip hidden cover.html
 
 # Both, with independent passwords
-python arcager.py -E -a ./flags -a secret.zip hidden page.html
+python arcager.py -E -b ./flags -b secret.zip hidden page.html
 ```
 
 | Layer | Flag | What is encrypted | Who sees it |
 |---|---|---|---|
 | **Payload** | `-E` | HTML + hoisted data URIs | Browser prompts on load |
-| **Attachment** | `-a PATH hidden` | Hidden blob only | Extracted offline with `-x pack` |
+| **Bundle** | `-b PATH hidden` | Hidden blob only | Extracted offline with `-x pack` |
 
 **Implementation:**
 - AES-256-GCM authenticated encryption
 - PBKDF2-SHA256, 600,000 iterations
-- Separate salts and IVs for payload and attachment
+- Separate salts and IVs for payload and bundle
 - Wrong-password detection via an encrypted canary — clean *"Incorrect password."* message, never a decryption crash
 
 > [!IMPORTANT]
@@ -248,7 +262,7 @@ Already-compressed files (PNG, JPEG, MP4, ZIP, 7z, WOFF2, PDF, DOCX, …) are **
 
 ## Examples
 
-### Deliver a password-protected report to a client with Chrome browser
+### Deliver a password-protected report to a client
 
 ```bash
 python arcager.py -E --brotli -m \
@@ -258,21 +272,21 @@ python arcager.py -E --brotli -m \
 
 The client opens `packed_q3_report.html`, gets a password prompt, enters the password you shared out of band, and sees the report.
 
-### Bundle a static site into one file (with directory recursion)
+### Bundle a static site into one file
 
 ```bash
-python arcager.py -r --merge ./docs -m
+python arcager.py --merge ./docs --brotli -m
 ```
 
 Scans `./docs/`, finds `./docs/index.html`, inlines local CSS, JS, fonts, images and icons, and writes `packed_docs.html` alongside the `docs/` folder. Review the merge report to see what could not be flattened.
 
-### Bundle a page with a folder containing country flag images
+### Bundle a page with a folder of flags
 
 ```bash
-python arcager.py -a ./country_flags page.html
+python arcager.py -b ./flags page.html
 ```
 
-Every image in `./country_flags` becomes available at runtime. A reference like `<img src="country_flags/ge.png">` in `page.html` is rewritten to the in-memory attachment.
+Every image in `./flags` becomes available at runtime. A reference like `<img src="flags/ge.png">` in `page.html` is rewritten to the in-memory bundle.
 
 ```javascript
 await arcager.ready;
@@ -284,14 +298,29 @@ document.body.appendChild(img);
 ### Hide arbitrary files inside a normal-looking page
 
 ```bash
-python arcager.py -a secret.zip hidden -a documents/ hidden cover.html
+python arcager.py -b secret.zip hidden -b documents/ hidden cover.html
 ```
 
-Produces a plain HTML cover page. `secret.zip` and a zipped copy of `documents/` are encrypted inside the page with an attachment password you choose at prompt time.
+Produces a plain HTML cover page. `secret.zip` and a zipped copy of `documents/` are encrypted inside the page with a bundle password you choose at prompt time.
 
 ```bash
 # Recover them
 python arcager.py -x pack -O ./out packed_cover.html
+```
+
+### Combine payload and bundle encryption
+
+```bash
+python arcager.py -E -b ./flags -b secret.zip hidden page.html
+```
+
+Three prompts: payload password (and confirm), then bundle password. The page is encrypted; `./flags` is encrypted and auto-loaded into `window.arcager.images` after the payload password is entered; `secret.zip` is encrypted separately and never loaded by the browser.
+
+```bash
+# Recover everything
+python arcager.py -u --password PW packed_page.html
+python arcager.py -x all -O ./out --password PW \
+    --bundle-password BPW packed_page.html
 ```
 
 ### Inspect what a bundle contains
@@ -300,9 +329,19 @@ python arcager.py -x pack -O ./out packed_cover.html
 python arcager.py -l packed_flags.html
 python arcager.py -l images packed_flags.html
 python arcager.py -l pack packed_cover.html
+python arcager.py -l images,videos packed_media.html
 ```
 
 No password needed — metadata is unencrypted.
+
+### Extract media for auditing or reuse
+
+```bash
+python arcager.py -x all -O ./out packed_flags.html
+python arcager.py -x pack -O ./secret packed_cover.html
+```
+
+Files land under `./out/` (or `./secret/`), one subfolder per input when extracting from multiple files.
 
 ### Batch-pack a directory tree
 
@@ -311,6 +350,14 @@ python arcager.py -r ./public --brotli -m -f
 ```
 
 Every `.html` under `./public/` (recursively) is packed into `packed_<name>.html` in the same folder.
+
+### Custom output prefix
+
+```bash
+python arcager.py --prefix mypack_ page.html
+```
+
+Produces `mypack_page.html` instead of `packed_page.html`. The same prefix is recognized when unpacking.
 
 ### Keep small vector assets inline
 
@@ -336,17 +383,23 @@ Large base64 PNGs and JPEGs are hoisted into the binary blob. Tiny SVGs and GIFs
                         For -x, this is the extraction destination.
 -f, --force             Overwrite output without prompting.
 -r, --recursive         Recurse into subdirectories when scanning.
+--prefix PREFIX         Prefix for pack/merge output names.
+                        Defaults to 'packed_'. Also used to strip
+                        the prefix when unpacking a file packed
+                        with --prefix.
 ```
 
 ### Compression
 ```
 --brotli                Use Brotli instead of gzip (Chrome 105+ only).
--m, --minify [lossy]    Minify the unpacker JS and the payload before
-                        compressing. Add 'lossy' to also collapse
-                        inter-tag whitespace, remove sourceMappingURL
-                        code comments. It's lossy. (requires Terser)
+-m, --minify [lossy]    Minify the unpacker JS (via Terser on PATH).
+                        Add 'lossy' to ALSO strip HTML comments,
+                        collapse inter-tag whitespace, and remove
+                        sourceMappingURL comments from the payload.
+                        Lossy.
 --ignore-uris LIST      Comma-separated MIME prefixes to KEEP as data:
-                        URIs rather than hoist.
+                        URIs rather than hoist. Example:
+                            --ignore-uris image/svg+xml,image/gif
 ```
 
 ### Payload modification (lossy)
@@ -359,13 +412,16 @@ Large base64 PNGs and JPEGs are hoisted into the binary blob. Tiny SVGs and GIFs
 ```
 -E, --encrypt           Encrypt the HTML payload.
 --password PW           Non-interactive payload password.
---attach-password PW    Non-interactive attachment password.
+--bundle-password PW    Non-interactive bundle password (for
+                        hidden bundles).
 ```
 
-### Attachments
+### Bundles
 ```
--a, --attach PATH [hidden]
-                        Attach media (or, with 'hidden', any file).
+-b, --bundle PATH [hidden]
+                        Bundle media (or, with 'hidden', any file).
+                        Can be given multiple times. Visible and
+                        hidden bundles can be mixed freely.
 ```
 
 ### Unpack
@@ -380,8 +436,12 @@ Large base64 PNGs and JPEGs are hoisted into the binary blob. Tiny SVGs and GIFs
 
 ### List / Extract
 ```
--l, --list [TYPE]              List media.
--x, --extract [TYPE]           Extract into an output directory.
+-l, --list [TYPE,...]          List media. TYPE can be a comma-
+                               separated list, e.g. images,videos.
+-x, --extract [TYPE,...]       Extract into an output directory.
+                               TYPE as for -l.
+
+TYPE: all | media | pack | images | videos | audio | fonts | docs
 ```
 
 ### Misc
@@ -433,11 +493,12 @@ Large base64 PNGs and JPEGs are hoisted into the binary blob. Tiny SVGs and GIFs
 </details>
 
 <details>
-<summary><strong>Attachments</strong></summary>
+<summary><strong>Bundles</strong></summary>
 
-- Visible attachments: **128 MB** total uncompressed cap.
+- Visible bundles: **128 MB** total uncompressed cap.
 - Hidden payloads: **512 MB** total uncompressed cap.
 - Keys must use letters, digits, `_`, `-`, `.`, `/`, space, `@`, `+`. Anything else aborts the pack with a clear error naming the offending file.
+- Encrypted zip archives are detected and refused with a hint to use hidden bundling.
 
 </details>
 
@@ -473,7 +534,8 @@ The whole payload is held in memory during pack and unpack.
 | Merge report lists "unmergeable" entries | These are `<a href>` or `<iframe src>` pointing at other local `.html` files, which cannot be flattened into a single document. |
 | Merge report lists "missing" entries | Run with `-v` to see the resolved path. Common causes: case mismatch, URL-encoded characters, dynamically-built URLs, or a `<base>` tag. |
 | `output would overwrite input` | `-o` points at the input file. Choose a different output path. |
-| `hidden attachments require an attachment password` | Pass `--attach-password` or run interactively. |
+| `hidden bundles require a bundle password` | Pass `--bundle-password` or run interactively. |
+| Encrypted zip archive encountered | Decrypt it first, or bundle the archive as-is with: `-b archive.zip hidden` |
 | Colored output renders as escape codes in Windows cmd | Use Windows Terminal, or set `NO_COLOR=1`. |
 | Packed file is larger than input | Small or media-dominated inputs grow. Use `-m`, or skip packing and use a plain archiver for storage. |
 
@@ -491,6 +553,6 @@ Third-party libraries used at runtime (`cryptography`, `brotli`, `terser`) keep 
 
 ## Credits
 
-`arcager` is a Python port of the original `arcager.js` by the same author. Only the python version is actively maintained at the moment.
+`arcager` is a Python port of the original `arcager.js` by the same author. Only the Python version is actively maintained at the moment.
 
 **See also:** [`LICENSE.txt`](LICENSE.txt)
