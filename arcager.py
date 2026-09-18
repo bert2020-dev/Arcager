@@ -14,22 +14,21 @@ Optional dependencies (only required for specific flags):
 Modes:
     pack      pack an HTML file into packed_<name>.html
     -u        unpack a packed file back to HTML
-    --merge   bundle a whole directory into one file
+    -M        merge a whole directory into one file
     -l        list media inside a packed or unpacked HTML file
-    -x        extract media or attachments from a packed or unpacked file
+    -x        extract media or bundles from a packed or unpacked file
 
-New in 3.0.0:
-    - Attachments may be visible (-a PATH) or hidden (-a PATH hidden).
-      Hidden attachments are encrypted with a dedicated attachment
-      password, independent from -E's payload password.
-    - Already-compressed files (images, video, archives, fonts) are
-      not re-compressed; the compressed form is used only when smaller.
-    - -l / -x use a single TYPE argument.
-    - -O DIR sets an output directory for any mode.
-    
+New in 3.2.0:
+    - CSV/TSV inlining via <link rel="csv" href="data.csv"> during --merge.
+      At runtime: window.arcager.csv['key'].rows / .data
+    - -l csv and -x csv scan and extract inlined CSV blocks.
+    - -M is a short option for --merge.
+    - window.arcager is always defined after load (empty when no
+      bundles or CSV are present).
+
 @Author: Bert Coder
-@Update: Nov, 15, 2026
-@Note: Apha, pre-repository upload
+@Update: Nov, 18, 2026
+@Note: Alpha, pre-repository upload
 """
 
 import base64
@@ -96,7 +95,7 @@ for _s in (sys.stdout, sys.stderr):
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-VERSION   = '3.0.0'
+VERSION   = '3.2.0'
 SIGNATURE = '<!--arcager:3-->'
 SIG_RE    = re.compile(r'^<!--arcager:(\d+)-->')
 
@@ -113,9 +112,6 @@ Z85M = [-1] * 128
 for _i, _ch in enumerate(Z85A):
     Z85M[ord(_ch)] = _i
 
-# Files whose extension already implies strong compression.  These are
-# stored as-is and skipped by the outer compressor when nothing else
-# needs compressing.
 _ALREADY_COMPRESSED_EXTS = {
     '.png', '.jpg', '.jpeg', '.gif', '.webp', '.avif', '.ico',
     '.mp3', '.ogg', '.oga', '.m4a', '.aac', '.flac', '.opus',
@@ -410,7 +406,13 @@ _SOURCEMAP_CSS_RE = re.compile(
     r'^[ \t]*/\*[#@]\s*sourceMappingURL=[^*]*\*/\r?\n?', re.MULTILINE)
 
 
-def minify_html(html: str, lossy: bool):
+def minify_html_lossy(html: str):
+    """Lossy HTML minification: strip comments, collapse inter-tag
+    whitespace, remove sourceMappingURL comments.  Only called when
+    the user passes `-m lossy`.
+
+    Returns (html, comments_stripped, whitespace_collapsed, sourcemaps_stripped).
+    """
     segments = []
     last = 0
     for m in _PROTECT_RE.finditer(html):
@@ -431,19 +433,16 @@ def minify_html(html: str, lossy: bool):
         before = len(text)
         t = _COMMENT_RE.sub('', text)
         stripped += before - len(t)
-        if lossy:
-            before = len(t)
-            t = _WS_RE.sub('><', t)
-            collapsed += before - len(t)
+        before = len(t)
+        t = _WS_RE.sub('><', t)
+        collapsed += before - len(t)
         out_segs.append(t)
 
     result = ''.join(out_segs)
-    sm = 0
-    if lossy:
-        before = len(result)
-        result = _SOURCEMAP_JS_RE.sub('', result)
-        result = _SOURCEMAP_CSS_RE.sub('', result)
-        sm = before - len(result)
+    before = len(result)
+    result = _SOURCEMAP_JS_RE.sub('', result)
+    result = _SOURCEMAP_CSS_RE.sub('', result)
+    sm = before - len(result)
 
     return result, stripped, collapsed, sm
 
@@ -483,7 +482,7 @@ def scan_dir(root: str, max_depth: int):
 # ---------------------------------------------------------------------------
 # Media tables
 # ---------------------------------------------------------------------------
-_ATTACH_EXTS = {
+_BUNDLE_EXTS = {
     # Images
     '.png':  'image/png', '.jpg':  'image/jpeg', '.jpeg': 'image/jpeg',
     '.webp': 'image/webp', '.gif': 'image/gif', '.svg': 'image/svg+xml',
@@ -505,6 +504,8 @@ _ATTACH_EXTS = {
     '.pdf': 'application/pdf', '.eps': 'application/postscript',
     '.txt': 'text/plain', '.md': 'text/markdown',
     '.markdown': 'text/markdown',
+    # Data
+    '.csv': 'text/csv', '.tsv': 'text/tab-separated-values',
 }
 
 _ARCHIVE_EXTS = ('.zip', '.tar', '.tar.gz', '.tgz', '.tbz2', '.txz',
@@ -512,12 +513,12 @@ _ARCHIVE_EXTS = ('.zip', '.tar', '.tar.gz', '.tgz', '.tbz2', '.txz',
 
 _SAFE_KEY_RE = re.compile(r'^[\w\-./ @+]+$', re.UNICODE)
 
-_ATTACH_MAX_TOTAL = 128 * 1024 * 1024
+_BUNDLE_MAX_TOTAL = 128 * 1024 * 1024
 _HIDDEN_MAX_TOTAL = 512 * 1024 * 1024
 
 # Types accepted by -l / -x.
 _LIST_TYPES = ('all', 'images', 'videos', 'audio', 'fonts', 'docs',
-               'media', 'pack')
+               'media', 'pack', 'csv')
 
 _EXT_BY_MIME = {
     'image/png': '.png', 'image/jpeg': '.jpg', 'image/webp': '.webp',
@@ -534,6 +535,7 @@ _EXT_BY_MIME = {
     'text/html': '.html', 'application/xhtml+xml': '.xhtml',
     'application/pdf': '.pdf', 'application/postscript': '.eps',
     'text/plain': '.txt', 'text/markdown': '.md',
+    'text/csv': '.csv', 'text/tab-separated-values': '.tsv',
 }
 
 
@@ -541,6 +543,8 @@ def media_category(mime):
     if not mime:
         return 'other'
     m = mime.lower().split(';', 1)[0].strip()
+    if m == 'text/csv' or m == 'text/tab-separated-values':
+        return 'csv'
     if m.startswith('image/'):
         return 'images'
     if m.startswith('video/'):
@@ -561,8 +565,8 @@ def media_category(mime):
 
 def _mime_for(path: str) -> str:
     ext = os.path.splitext(path)[1].lower()
-    if ext in _ATTACH_EXTS:
-        return _ATTACH_EXTS[ext]
+    if ext in _BUNDLE_EXTS:
+        return _BUNDLE_EXTS[ext]
     mt, _ = mimetypes.guess_type(path)
     return mt or 'application/octet-stream'
 
@@ -572,24 +576,76 @@ def _mime_from_url(url):
     return _mime_for(p)
 
 
+def _parse_type_list(value):
+    """Return a list of type names if every comma-separated token is a
+    known type, else None."""
+    parts = [p.strip() for p in value.split(',') if p.strip()]
+    if not parts:
+        return None
+    for p in parts:
+        if p not in _LIST_TYPES:
+            return None
+    return parts
+
+
+def _item_matches_types(item, types):
+    """True when `item` (with 'source' and 'category' keys) matches the
+    requested list of type names."""
+    if not types or 'all' in types:
+        return True
+    if item['source'] in types:
+        return True
+    if item['category'] in types:
+        return True
+    return False
+
+
 # ---------------------------------------------------------------------------
-# Attachment collection (visible and hidden)
+# CSV block scanning
+# ---------------------------------------------------------------------------
+_SCRIPT_TAG_RE = re.compile(r'<script\b([^>]*?)>([\s\S]*?)</script\s*>',
+                            re.IGNORECASE)
+_CSV_TYPE_RE   = re.compile(r'\btype\s*=\s*([\'"])text/csv\1',
+                            re.IGNORECASE)
+_CSV_KEY_RE    = re.compile(r'\bdata-key\s*=\s*([\'"])([^\'"]+)\1',
+                            re.IGNORECASE)
+
+
+def _scan_csv_blocks(html):
+    """Find all <script type="text/csv"> blocks.
+
+    Returns a list of {'key': str, 'body': str}.
+    """
+    found = []
+    for m in _SCRIPT_TAG_RE.finditer(html):
+        attrs = m.group(1) or ''
+        if not _CSV_TYPE_RE.search(attrs):
+            continue
+        body = m.group(2)
+        km = _CSV_KEY_RE.search(attrs)
+        key = km.group(2) if km else f'csv{len(found)}'
+        found.append({'key': key, 'body': body.strip('\r\n')})
+    return found
+
+
+# ---------------------------------------------------------------------------
+# Bundle collection (visible and hidden)
 # ---------------------------------------------------------------------------
 def _validate_key(key: str, src: str):
     if not key:
-        raise RuntimeError(f'attachment has empty key: {src}')
+        raise RuntimeError(f'bundle has empty key: {src}')
     if not _SAFE_KEY_RE.match(key):
         bad = sorted(set(ch for ch in key if not _SAFE_KEY_RE.match(ch)))
         raise RuntimeError(
-            f'attachment key {key!r} (from {src}) contains unsafe '
+            f'bundle key {key!r} (from {src}) contains unsafe '
             f'character(s) {bad!r}; rename the file so the key only '
             f'uses letters, digits, _, -, ., /, space, @, +')
     if key.endswith(('/', '.')):
         raise RuntimeError(
-            f'attachment key {key!r} (from {src}) ends with a slash or dot')
+            f'bundle key {key!r} (from {src}) ends with a slash or dot')
     if '..' in key.split('/'):
         raise RuntimeError(
-            f'attachment key {key!r} (from {src}) contains a ".." segment')
+            f'bundle key {key!r} (from {src}) contains a ".." segment')
 
 
 def _read_bytes(p: str) -> bytes:
@@ -597,11 +653,11 @@ def _read_bytes(p: str) -> bytes:
         return f.read()
 
 
-def _walk_attach_dir(root: str, root_name: str, out: list, vlog):
+def _walk_bundle_dir(root: str, root_name: str, out: list, vlog):
     for cur, _dirs, files in os.walk(root):
         for f in sorted(files):
             ext = os.path.splitext(f)[1].lower()
-            mime = _ATTACH_EXTS.get(ext)
+            mime = _BUNDLE_EXTS.get(ext)
             if not mime:
                 continue
             abs_path = os.path.join(cur, f)
@@ -614,10 +670,10 @@ def _walk_attach_dir(root: str, root_name: str, out: list, vlog):
                 'key': key, 'alias': alias, 'data': data,
                 'mime': mime, 'src': abs_path,
             })
-            vlog(f'attach: {key} ({mime}, {size_str(len(data))})')
+            vlog(f'bundle: {key} ({mime}, {size_str(len(data))})')
 
 
-def _read_attach_archive(path: str, out: list, vlog):
+def _read_bundle_archive(path: str, out: list, vlog):
     lower = path.lower()
     if lower.endswith('.zip'):
         with zipfile.ZipFile(path) as z:
@@ -626,8 +682,15 @@ def _read_attach_archive(path: str, out: list, vlog):
                     continue
                 if os.path.basename(name).startswith('.'):
                     continue
+                info = z.getinfo(name)
+                if info.flag_bits & 0x1:
+                    raise RuntimeError(
+                        f'zip entry {name!r} in {path} is encrypted.  '
+                        f'Arcager cannot decrypt zip archives; '
+                        f'either decrypt it first, or bundle the '
+                        f'archive as-is with: -b {path} hidden')
                 ext = os.path.splitext(name)[1].lower()
-                mime = _ATTACH_EXTS.get(ext)
+                mime = _BUNDLE_EXTS.get(ext)
                 if not mime:
                     continue
                 key = os.path.splitext(name.replace('\\', '/'))[0]
@@ -637,7 +700,7 @@ def _read_attach_archive(path: str, out: list, vlog):
                     'key': key, 'alias': None, 'data': data,
                     'mime': mime, 'src': f'{path}:{name}',
                 })
-                vlog(f'attach: {key} ({mime}, {size_str(len(data))})')
+                vlog(f'bundle: {key} ({mime}, {size_str(len(data))})')
     else:
         with tarfile.open(path, 'r:*') as t:
             for m in t.getmembers():
@@ -648,7 +711,7 @@ def _read_attach_archive(path: str, out: list, vlog):
                 if os.path.basename(m.name).startswith('.'):
                     continue
                 ext = os.path.splitext(m.name)[1].lower()
-                mime = _ATTACH_EXTS.get(ext)
+                mime = _BUNDLE_EXTS.get(ext)
                 if not mime:
                     continue
                 key = os.path.splitext(m.name.replace('\\', '/'))[0]
@@ -661,29 +724,29 @@ def _read_attach_archive(path: str, out: list, vlog):
                     'key': key, 'alias': None, 'data': data,
                     'mime': mime, 'src': f'{path}:{m.name}',
                 })
-                vlog(f'attach: {key} ({mime}, {size_str(len(data))})')
+                vlog(f'bundle: {key} ({mime}, {size_str(len(data))})')
 
 
-def collect_visible_attachments(paths, vlog):
+def collect_visible_bundles(paths, vlog):
     out_files = []
     for p in paths:
         abs_p = os.path.abspath(p)
         if not os.path.exists(abs_p):
-            raise RuntimeError(f'attachment not found: {p}')
+            raise RuntimeError(f'bundle not found: {p}')
         if os.path.isdir(abs_p):
             root_name = os.path.basename(abs_p.rstrip(os.sep))
-            _walk_attach_dir(abs_p, root_name, out_files, vlog)
+            _walk_bundle_dir(abs_p, root_name, out_files, vlog)
         elif os.path.isfile(abs_p):
             lower = abs_p.lower()
             if any(lower.endswith(ext) for ext in _ARCHIVE_EXTS):
-                _read_attach_archive(abs_p, out_files, vlog)
+                _read_bundle_archive(abs_p, out_files, vlog)
             else:
                 ext = os.path.splitext(abs_p)[1].lower()
-                mime = _ATTACH_EXTS.get(ext)
+                mime = _BUNDLE_EXTS.get(ext)
                 if not mime:
                     raise RuntimeError(
-                        f'unsupported visible attachment format: {p}\n'
-                        f'  (supported: {", ".join(sorted(_ATTACH_EXTS))}, '
+                        f'unsupported visible bundle format: {p}\n'
+                        f'  (supported: {", ".join(sorted(_BUNDLE_EXTS))}, '
                         f'plus .zip/.tar/.tar.gz/.tgz/.tbz2/.txz)')
                 key = os.path.splitext(os.path.basename(abs_p))[0]
                 _validate_key(key, abs_p)
@@ -692,17 +755,17 @@ def collect_visible_attachments(paths, vlog):
                     'key': key, 'alias': None, 'data': data,
                     'mime': mime, 'src': abs_p,
                 })
-                vlog(f'attach: {key} ({mime}, {size_str(len(data))})')
+                vlog(f'bundle: {key} ({mime}, {size_str(len(data))})')
     return out_files
 
 
-def build_visible_blob(entries, vlog):
+def build_visible_bundle_blob(entries, vlog):
     by_key = {}
     for e in entries:
         k = e['key']
         if k in by_key:
             raise RuntimeError(
-                f'duplicate attachment key {k!r}: '
+                f'duplicate bundle key {k!r}: '
                 f'{by_key[k]["src"]} and {e["src"]}')
         by_key[k] = e
 
@@ -729,15 +792,15 @@ def build_visible_blob(entries, vlog):
         aliases[a] = e['key']
 
     total = sum(len(p) for p in parts)
-    if total > _ATTACH_MAX_TOTAL:
+    if total > _BUNDLE_MAX_TOTAL:
         raise RuntimeError(
-            f'attachments total {size_str(total)} exceeds '
-            f'{size_str(_ATTACH_MAX_TOTAL)} limit')
+            f'bundles total {size_str(total)} exceeds '
+            f'{size_str(_BUNDLE_MAX_TOTAL)} limit')
     return b''.join(parts), meta, aliases
 
 
 # ---------------------------------------------------------------------------
-# Hidden attachment collection
+# Hidden bundle collection
 # ---------------------------------------------------------------------------
 def _zip_dir_in_memory(root: str) -> bytes:
     """Zip a folder in memory, using ZIP_STORED so the outer compressor
@@ -753,8 +816,8 @@ def _zip_dir_in_memory(root: str) -> bytes:
     return buf.getvalue()
 
 
-def collect_hidden_entries(paths, vlog):
-    """One hidden entry per --attach input.
+def collect_hidden_bundles(paths, vlog):
+    """One hidden entry per -b input.
 
     Files are stored as-is.  Folders are zipped in memory.  Archives are
     stored whole, not unpacked.
@@ -763,7 +826,7 @@ def collect_hidden_entries(paths, vlog):
     for p in paths:
         abs_p = os.path.abspath(p)
         if not os.path.exists(abs_p):
-            raise RuntimeError(f'hidden attachment not found: {p}')
+            raise RuntimeError(f'hidden bundle not found: {p}')
         if os.path.isdir(abs_p):
             data = _zip_dir_in_memory(abs_p)
             key = os.path.basename(abs_p.rstrip(os.sep)) + '.zip'
@@ -781,7 +844,7 @@ def collect_hidden_entries(paths, vlog):
     return out_files
 
 
-def build_hidden_blob(entries, vlog):
+def build_hidden_bundle_blob(entries, vlog):
     by_key = {}
     for e in entries:
         k = e['key']
@@ -817,12 +880,12 @@ def parse_args(argv):
         verbose=False, brotli=False, minify=False, lossy=False,
         base_href=None, ignore_uris=[],
         force=False, unpack=False, recursive=False,
-        output=None, output_dir=None, inputs=[],
-        encrypt=False, password=None, attach_password=None,
+        output=None, output_dir=None, prefix=None, inputs=[],
+        encrypt=False, password=None, bundle_password=None,
         merge=None,
-        attach=[],                 # [{'path': str, 'hidden': bool}, ...]
-        list_mode=False, list_type='all',
-        extract_mode=False, extract_type='all',
+        bundle=[],
+        list_mode=False, list_types=['all'],
+        extract_mode=False, extract_types=['all'],
     )
     i = 0
     n = len(argv)
@@ -845,27 +908,31 @@ def parse_args(argv):
             o['recursive'] = True
         elif a in ('--encrypt', '-E'):
             o['encrypt'] = True
-        elif a in ('--attach', '-a'):
+        elif a in ('--bundle', '-b'):
             i += 1
             if i >= n:
-                die('--attach needs a file or folder')
+                die('--bundle needs a file or folder')
             path = argv[i]
             hidden = False
             if i + 1 < n and argv[i + 1] == 'hidden':
                 i += 1
                 hidden = True
-            o['attach'].append({'path': path, 'hidden': hidden})
+            o['bundle'].append({'path': path, 'hidden': hidden})
         elif a in ('-l', '--list'):
             o['list_mode'] = True
-            if i + 1 < n and argv[i + 1] in _LIST_TYPES:
-                i += 1
-                o['list_type'] = argv[i]
+            if i + 1 < n:
+                tl = _parse_type_list(argv[i + 1])
+                if tl is not None:
+                    i += 1
+                    o['list_types'] = tl
         elif a in ('-x', '--extract'):
             o['extract_mode'] = True
-            if i + 1 < n and argv[i + 1] in _LIST_TYPES:
-                i += 1
-                o['extract_type'] = argv[i]
-        elif a == '--merge':
+            if i + 1 < n:
+                tl = _parse_type_list(argv[i + 1])
+                if tl is not None:
+                    i += 1
+                    o['extract_types'] = tl
+        elif a in ('-M', '--merge'):
             i += 1
             if i >= n:
                 die('--merge needs a directory')
@@ -875,11 +942,11 @@ def parse_args(argv):
             if i >= n:
                 die('--password needs a value')
             o['password'] = argv[i]
-        elif a == '--attach-password':
+        elif a == '--bundle-password':
             i += 1
             if i >= n:
-                die('--attach-password needs a value')
-            o['attach_password'] = argv[i]
+                die('--bundle-password needs a value')
+            o['bundle_password'] = argv[i]
         elif a == '--base-href':
             i += 1
             if i >= n:
@@ -891,6 +958,11 @@ def parse_args(argv):
                 die('--ignore-uris needs a value')
             o['ignore_uris'] = [s.strip()
                                 for s in argv[i].split(',') if s.strip()]
+        elif a == '--prefix':
+            i += 1
+            if i >= n:
+                die('--prefix needs a value')
+            o['prefix'] = argv[i]
         elif a in ('-o', '--output'):
             i += 1
             if i >= n:
@@ -919,9 +991,9 @@ def usage():
 Usage:
   python arcager.py [options] <input...>              pack
   python arcager.py -u [options] <input...>           unpack
-  python arcager.py --merge <dir> [options]           merge a directory
-  python arcager.py -l [TYPE] <input...>              list media
-  python arcager.py -x [TYPE] <input...>              extract media
+  python arcager.py -M <dir> [options]                merge a directory
+  python arcager.py -l [TYPE,...] <input...>          list media
+  python arcager.py -x [TYPE,...] <input...>          extract media
 
 Inputs may be files, directories, or shell globs.  A directory input
 scans its .html/.htm files at the top level only; use -r to descend.
@@ -929,10 +1001,10 @@ scans its .html/.htm files at the top level only; use -r to descend.
 Options:
   -v, --verbose           Per-stage diagnostics on stderr.
       --brotli            Use Brotli instead of gzip (Chrome 105+ only).
-  -m, --minify [lossy]    Minify the unpacker JS and strip HTML comments
-                          from the payload.  Add 'lossy' to also collapse
-                          inter-tag whitespace and remove sourceMappingURL
-                          comments.  Lossy.
+  -m, --minify [lossy]    Run Terser on the inline unpacker JS.  Add
+                          'lossy' to ALSO strip HTML comments, collapse
+                          inter-tag whitespace, and remove sourceMappingURL
+                          comments from the payload.  Lossy.
       --base-href URL     Inject <base href="URL"> into the payload.
                           Lossy.
       --ignore-uris LIST  Comma-separated media-type prefixes to NOT hoist.
@@ -940,26 +1012,32 @@ Options:
                           (PBKDF2-SHA256, 600k iterations).  Prompts for a
                           payload password unless --password is given.
       --password PW       Non-interactive payload password.
-      --attach-password PW
-                          Non-interactive attachment password (for hidden
-                          attachments).
-  -a, --attach PATH [hidden]
-                          Attach media from a file, folder, or archive.
-                          Without 'hidden', files are exposed to the page
-                          at runtime as window.arcager.images.  With
-                          'hidden', files are packed as an encrypted blob
-                          the browser never loads; extract with
-                          '-x pack'.  Hidden attachments use their own
-                          password.
-  -l, --list [TYPE]       List media inside a packed or unpacked HTML
+      --bundle-password PW
+                          Non-interactive bundle password (for hidden
+                          bundles).
+  -b, --bundle PATH [hidden]
+                          Bundle media from a file, folder, or archive.
+                          Can be given multiple times.  Without 'hidden',
+                          files are exposed to the page at runtime as
+                          window.arcager.images.  With 'hidden', files are
+                          packed as an encrypted blob the browser never
+                          loads; extract with '-x pack'.  Hidden bundles
+                          use their own password.
+  -M, --merge DIR         Merge a directory into one packed file.
+                          Inlines local CSS, JS, fonts, images, video,
+                          CSV and TSV.  <link rel="csv" href="data.csv">
+                          is inlined as <script type="text/csv"> and
+                          exposed at runtime as window.arcager.csv.
+  -l, --list [TYPE,...]   List media inside a packed or unpacked HTML
                           file.  Listing never needs a password.
-                          TYPE: {('|'.join(_LIST_TYPES))}
+                          TYPE (comma-separated):
                             all    - everything (default)
                             media  - hoisted data URIs from the payload
-                            pack   - attachments (visible + hidden)
+                            pack   - bundles (visible + hidden)
+                            csv    - inlined CSV / TSV data blocks
                             images | videos | audio | fonts | docs
                                    - filter by category
-  -x, --extract [TYPE]    Extract media into an output directory.
+  -x, --extract [TYPE,...]  Extract media into an output directory.
                           TYPE as for -l.  Prompts for passwords as needed.
                           Destination comes from -O; defaults to ./extracted.
   -f, --force             Overwrite output without prompting.
@@ -968,11 +1046,8 @@ Options:
   -o, --output PATH       Output file path (single input, or --merge).
   -O, --output-dir DIR    Output directory for any mode.  Auto-created.
                           For -x it is the extraction destination.
-      --merge DIR         Merge a directory into one packed file.
-                          Inlines local CSS, JS, fonts (*.woff, *.woff2,
-                          *.ttf, *.otf, *.eot) and media (*.png, *.jpg,
-                          *.svg, *.mp4, ...) references, plus CSS url()
-                          and @import chains.
+      --prefix PREFIX     Prefix for pack/merge output names.  Defaults
+                          to 'packed_'.  Also stripped during unpack.
   -V, --version           Print version.
   -h, --help              This message.""")
 
@@ -1134,6 +1209,53 @@ function remapHTML(html,images){
   html=html.replace(/url\(\s*(["']?)([^"')]+)\1\s*\)/gi,function(m,q,url){var v=remapURL(url,images);return v?'url('+q+v+q+')':m;});
   return html;
 }
+function parseCSV(text,delim){
+  delim=delim||',';
+  var rows=[],row=[],field='',inQ=false,i=0,n=text.length;
+  function flushRow(){if(row.length||field.length){row.push(field);rows.push(row);row=[];field='';}}
+  while(i<n){
+    var c=text[i];
+    if(inQ){
+      if(c==='"'){
+        if(i+1<n&&text[i+1]==='"'){field+='"';i+=2;continue;}
+        inQ=false;i++;continue;
+      }
+      field+=c;i++;continue;
+    }
+    if(c==='"'){inQ=true;i++;continue;}
+    if(c===delim){row.push(field);field='';i++;continue;}
+    if(c==='\r'){flushRow();if(i+1<n&&text[i+1]==='\n')i++;i++;continue;}
+    if(c==='\n'){flushRow();i++;continue;}
+    field+=c;i++;
+  }
+  flushRow();
+  return rows;
+}
+function csvToObjects(rows){
+  if(!rows.length)return [];
+  var headers=rows[0],out=[];
+  for(var i=1;i<rows.length;i++){
+    var obj={};
+    for(var j=0;j<headers.length;j++){
+      obj[headers[j]]=rows[i][j]!==undefined?rows[i][j]:'';
+    }
+    out.push(obj);
+  }
+  return out;
+}
+function loadCSVBlocks(){
+  var blocks=document.querySelectorAll('script[type="text/csv"]');
+  if(!blocks.length)return null;
+  var csv={};
+  for(var i=0;i<blocks.length;i++){
+    var el=blocks[i];
+    var key=el.getAttribute('data-key')||('csv'+i);
+    var delim=el.getAttribute('data-delim')||',';
+    var rows=parseCSV(el.textContent||'',delim);
+    csv[key]={rows:rows,data:csvToObjects(rows)};
+  }
+  return csv;
+}
 (async function(){
   try{
     if(PANEL&&PANEL.parentNode)PANEL.parentNode.removeChild(PANEL);
@@ -1144,30 +1266,28 @@ function remapHTML(html,images){
     if(D.att&&D.att.m&&D.att.m.length){
       try{
         var attEl=document.getElementById('__att_data');
-        if(!attEl)throw new Error('attachment container missing');
+        if(!attEl)throw new Error('bundle container missing');
         var attBytes=z85d(attEl.textContent||'',D.att.cs);
         if(KEY&&D.pe&&D.pe.iv3)attBytes=await decBytes(KEY,D.pe.iv3,attBytes);
         var attRaw=D.att.c?await decompressBytes(attBytes,ALGO,D.att.n,null):attBytes;
         IMAGES=buildImages(attRaw,D.att);
       }catch(e){
-        if(window.console)console.error('attachment load failed',e);
+        if(window.console)console.error('bundle load failed',e);
         IMAGES=null;
       }
-      if(IMAGES){
-        window.arcager={
-          images:IMAGES,
-          getImage:function(k){
-            if(k===undefined||k===null)return null;
-            var v=IMAGES[k]||IMAGES[String(k).toLowerCase()];
-            if(!v)return null;
-            var img=new Image();img.src=v;return img;
-          },
-          ready:Promise.resolve(IMAGES)
-        };
-      }else{
-        window.arcager={images:{},getImage:function(){return null;},ready:Promise.resolve({})};
-      }
     }
+    var CSV=loadCSVBlocks();
+    window.arcager={
+      images:IMAGES||{},
+      csv:CSV||{},
+      getImage:function(k){
+        if(!IMAGES||k===undefined||k===null)return null;
+        var v=IMAGES[k]||IMAGES[String(k).toLowerCase()];
+        if(!v)return null;
+        var img=new Image();img.src=v;return img;
+      },
+      ready:Promise.resolve({images:IMAGES||{},csv:CSV||{}})
+    };
     await whenParsed();
     var hzBytes=z85d(D.h.z,D.h.cs);
     if(KEY&&D.pe&&D.pe.iv1)hzBytes=await decBytes(KEY,D.pe.iv1,hzBytes);
@@ -1286,18 +1406,14 @@ MIN_EXTRACT = 256
 
 def _pack_html_to_file(html: str, out_name: str, display_name: str,
                        opts, vlog, in_size: int) -> dict:
-    # ---- minify -------------------------------------------------------
-    if opts['minify']:
+    # ---- lossy HTML minification -------------------------------------
+    if opts['minify'] and opts['lossy']:
         before = len(html)
-        html, cs, wc, sm = minify_html(html, opts['lossy'])
-        parts = [f'comments -{cs}']
-        if opts['lossy']:
-            parts.append(f'whitespace -{wc}')
-            parts.append(f'sourcemaps -{sm}')
-        vlog(f"minify{' lossy' if opts['lossy'] else ''}: "
-             f"-{before - len(html)} chars ({', '.join(parts)})")
+        html, cs, wc, sm = minify_html_lossy(html)
+        vlog(f'minify lossy: -{before - len(html)} chars '
+             f'(comments -{cs}, whitespace -{wc}, sourcemaps -{sm})')
 
-    # ---- data URI hoisting --------------------------------------------
+    # ---- data URI hoisting -------------------------------------------
     uris = []
     for m in DATA_URI_RE.finditer(html):
         full, prefix, b64 = m.group(0), m.group(1), m.group(2)
@@ -1351,7 +1467,7 @@ def _pack_html_to_file(html: str, out_name: str, display_name: str,
             html = tag + html
         vlog(f'injected base href: {opts["base_href"]}')
 
-    # ---- compress HTML -----------------------------------------------
+    # ---- compress HTML ----------------------------------------------
     html_buf = html.encode('utf-8')
     algo = 'brotli' if opts['brotli'] else 'gzip'
 
@@ -1388,19 +1504,18 @@ def _pack_html_to_file(html: str, out_name: str, display_name: str,
         }
         vlog(f'payload encrypted: html {len(html_buf)} B')
 
-    # ---- visible attachments -----------------------------------------
+    # ---- visible bundles ---------------------------------------------
     att_z85 = ''
     att_meta = None
-    visible_paths = [a['path'] for a in opts['attach'] if not a['hidden']]
+    visible_paths = [a['path'] for a in opts['bundle'] if not a['hidden']]
     if visible_paths:
-        entries = collect_visible_attachments(visible_paths, vlog)
+        entries = collect_visible_bundles(visible_paths, vlog)
         if entries:
-            att_raw, att_list, att_aliases = build_visible_blob(entries, vlog)
+            att_raw, att_list, att_aliases = build_visible_bundle_blob(entries, vlog)
             pre = _all_entries_precompressed(entries)
             if pre:
                 att_cmp, att_c = att_raw, 0
-                vlog('attachments: all entries already compressed; '
-                     'storing raw')
+                vlog('bundles: all entries already compressed; storing raw')
             else:
                 att_cmp, att_c = maybe_compress(att_raw, algo)
 
@@ -1412,23 +1527,23 @@ def _pack_html_to_file(html: str, out_name: str, display_name: str,
                 'cs': len(att_cmp), 'n': len(att_raw), 'c': att_c,
                 'm': att_list, 'al': att_aliases,
             }
-            vlog(f'visible attachments: {len(entries)} file(s), '
+            vlog(f'visible bundles: {len(entries)} file(s), '
                  f'{size_str(len(att_raw))} raw -> '
                  f'{size_str(len(att_cmp))} final -> '
                  f'{len(att_z85)} z85 chars')
 
-    # ---- hidden attachments ------------------------------------------
+    # ---- hidden bundles ----------------------------------------------
     hid_z85 = ''
     hid_meta = None
     ae = None
-    hidden_paths = [a['path'] for a in opts['attach'] if a['hidden']]
+    hidden_paths = [a['path'] for a in opts['bundle'] if a['hidden']]
     if hidden_paths:
-        if not opts['attach_password']:
-            raise RuntimeError('hidden attachments require an attachment '
-                               'password (--attach-password or prompt)')
-        entries = collect_hidden_entries(hidden_paths, vlog)
+        if not opts['bundle_password']:
+            raise RuntimeError('hidden bundles require a bundle '
+                               'password (--bundle-password or prompt)')
+        entries = collect_hidden_bundles(hidden_paths, vlog)
         if entries:
-            hid_raw, hid_list = build_hidden_blob(entries, vlog)
+            hid_raw, hid_list = build_hidden_bundle_blob(entries, vlog)
             pre = _all_entries_precompressed(entries)
             if pre:
                 hid_cmp, hid_c = hid_raw, 0
@@ -1439,7 +1554,7 @@ def _pack_html_to_file(html: str, out_name: str, display_name: str,
             salt = random_b64(SALT_LEN)
             ivh = random_b64(IV_LEN)
             ivc = random_b64(IV_LEN)
-            hkey = derive_key(opts['attach_password'], salt,
+            hkey = derive_key(opts['bundle_password'], salt,
                               PBKDF2_ITERATIONS)
             hid_enc = aes_gcm_encrypt(hkey, ivh, hid_cmp)
             canary = aes_gcm_encrypt(hkey, ivc, PASSWORD_CHECK)
@@ -1453,7 +1568,7 @@ def _pack_html_to_file(html: str, out_name: str, display_name: str,
                 'cs': len(hid_enc), 'n': len(hid_raw), 'c': hid_c,
                 'm': hid_list,
             }
-            vlog(f'hidden attachments: {len(entries)} file(s), '
+            vlog(f'hidden bundles: {len(entries)} file(s), '
                  f'{size_str(len(hid_raw))} raw -> '
                  f'{size_str(len(hid_enc))} encrypted -> '
                  f'{len(hid_z85)} z85 chars')
@@ -1501,6 +1616,26 @@ def _pack_html_to_file(html: str, out_name: str, display_name: str,
 # ---------------------------------------------------------------------------
 # Output path helpers
 # ---------------------------------------------------------------------------
+_DEFAULT_PACK_PREFIX = 'packed_'
+_DEFAULT_UNPACK_PREFIX = 'unpacked_'
+
+
+def _pack_prefix(opts) -> str:
+    return opts['prefix'] if opts.get('prefix') else _DEFAULT_PACK_PREFIX
+
+
+def _strip_known_prefix(base: str, opts) -> str:
+    """Strip the pack prefix from a base name, for deriving the 'core'."""
+    candidates = []
+    if opts.get('prefix'):
+        candidates.append(opts['prefix'])
+    candidates.extend((_DEFAULT_PACK_PREFIX, _DEFAULT_UNPACK_PREFIX))
+    for p in candidates:
+        if p and base.lower().startswith(p.lower()):
+            return base[len(p):]
+    return base
+
+
 def _prepare_dir(path: str, force: bool, check_empty: bool = False):
     if os.path.exists(path):
         if not os.path.isdir(path):
@@ -1540,7 +1675,7 @@ def pack_file(file, opts, vlog, prompt_overwrite):
     base = os.path.basename(file)
     dirp = os.path.dirname(file)
     stem = re.sub(r'\.html?$', '', base, flags=re.IGNORECASE)
-    out_name = _output_path(opts, f'packed_{stem}.html', dirp)
+    out_name = _output_path(opts, f'{_pack_prefix(opts)}{stem}.html', dirp)
 
     if read_signature(file) is not None:
         return {'file': file, 'status': 'skip-already-packed'}
@@ -1641,7 +1776,7 @@ def merge_directory(dir_path, opts, vlog, prompt_overwrite):
             f'no index.html found in {dir_path} '
             f'(looked for index.html, index.htm, default.html, default.htm)')
 
-    out_name = _output_path(opts, f'packed_{dir_name}.html',
+    out_name = _output_path(opts, f'{_pack_prefix(opts)}{dir_name}.html',
                             os.path.dirname(dir_abs))
     if os.path.abspath(out_name) == os.path.abspath(index_path):
         raise RuntimeError('output would overwrite index.html')
@@ -1656,7 +1791,7 @@ def merge_directory(dir_path, opts, vlog, prompt_overwrite):
     vlog(f'merging directory {dir_path}')
     vlog(f'index: {os.path.relpath(index_path, dir_abs)}')
 
-    stats = {'css': 0, 'js': 0, 'media': 0, 'fonts': 0, 'html': 1}
+    stats = {'css': 0, 'js': 0, 'media': 0, 'fonts': 0, 'csv': 0, 'html': 1}
     missing = set()
     external = set()
     unmergeable = set()
@@ -1746,6 +1881,32 @@ def merge_directory(dir_path, opts, vlog, prompt_overwrite):
         url = href_m.group(2)
         rel = rel_m.group(2).lower() if rel_m else ''
         rels = rel.split()
+
+        # CSV / TSV inlining (rel="csv" or file extension)
+        if ('csv' in rels
+                or url.lower().endswith('.csv')
+                or url.lower().endswith('.tsv')):
+            if _is_external(url):
+                external.add(url)
+                return tag
+            abs_path = _resolve_local(html_dir, url)
+            if not abs_path or not os.path.isfile(abs_path):
+                missing.add(url)
+                return tag
+            try:
+                nonlocal source_bytes
+                source_bytes += os.path.getsize(abs_path)
+                raw = read_text_file(abs_path)
+                key = os.path.splitext(os.path.basename(url))[0]
+                key = re.sub(r'[^\w\-]', '_', key)
+                safe = raw.replace('</script>', '<\\/script>')
+                stats['csv'] += 1
+                return (f'<script type="text/csv" data-key="{key}">'
+                        f'\n{safe}\n</script>')
+            except Exception as e:
+                vlog(f'warn: csv inline failed ({url}): {e}')
+                missing.add(url)
+                return tag
 
         if 'stylesheet' in rels:
             if _is_external(url):
@@ -1904,8 +2065,8 @@ def merge_directory(dir_path, opts, vlog, prompt_overwrite):
     html = _SRCSET_RE.sub(process_srcset, html)
 
     vlog(f'merge: css={stats["css"]} js={stats["js"]} '
-         f'media={stats["media"]} fonts={stats["fonts"]}, '
-         f'source {size_str(source_bytes)}')
+         f'media={stats["media"]} fonts={stats["fonts"]} '
+         f'csv={stats["csv"]}, source {size_str(source_bytes)}')
 
     res = _pack_html_to_file(html, out_name, os.path.basename(out_name),
                              opts, vlog, source_bytes)
@@ -1953,9 +2114,9 @@ def _parse_packed(path, vlog):
 def unpack_file(file, opts, vlog, prompt_overwrite):
     base = os.path.basename(file)
     dirp = os.path.dirname(file)
-    m = re.match(r'^packed_(.+)$', base, re.IGNORECASE)
-    core = m.group(1) if m else base
-    out_name = _output_path(opts, 'unpacked_' + core, dirp)
+    core = _strip_known_prefix(base, opts)
+    out_name = _output_path(opts,
+                            f'{_DEFAULT_UNPACK_PREFIX}{core}', dirp)
 
     if os.path.abspath(out_name) == os.path.abspath(file):
         raise RuntimeError('output would overwrite input')
@@ -2097,61 +2258,106 @@ def _list_unpacked_html(html):
     for m in re.finditer(r'url\(\s*([\'"]?)([^\'")]+)\1\s*\)',
                          html, re.IGNORECASE):
         add(m.group(2).strip())
+
+    # CSV blocks
+    for blk in _scan_csv_blocks(html):
+        items.append({
+            'kind': 'csv', 'name': blk['key'], 'mime': 'text/csv',
+            'size': len(blk['body']), 'category': 'csv',
+            'source': 'media',
+        })
+
     return items
 
 
-def list_media(path, list_type, vlog):
-    pk, _content = _parse_packed(path, vlog)
+def _list_from_payload_html(html):
+    """Return CSV items from a decompressed payload HTML string."""
+    items = []
+    for blk in _scan_csv_blocks(html):
+        items.append({
+            'kind': 'csv', 'name': blk['key'], 'mime': 'text/csv',
+            'size': len(blk['body']), 'category': 'csv',
+            'source': 'media',
+        })
+    return items
+
+
+def _get_payload_html(pk, content, path, opts):
+    """Return (html_string, key_or_None) by decoding the payload."""
+    key = None
+    if pk.get('pe'):
+        if not opts['password']:
+            opts['password'] = prompt_hidden_password(
+                f"Payload password for {os.path.basename(path)}: ")
+            if not opts['password']:
+                raise RuntimeError('payload password required')
+        key = derive_key(opts['password'], pk['pe']['s'], pk['pe']['i'])
+        try:
+            check = aes_gcm_decrypt(key, pk['pe']['ivc'],
+                                    base64.b64decode(pk['pe']['ck']))
+            if check != PASSWORD_CHECK:
+                raise RuntimeError('incorrect payload password')
+        except Exception:
+            raise RuntimeError('incorrect payload password')
+    h = pk['h']
+    html_cmp = z85_decode(h['z'], h['cs'])
+    if key is not None:
+        html_cmp = aes_gcm_decrypt(key, pk['pe']['iv1'], html_cmp)
+    html_buf = maybe_decompress(html_cmp, pk['a'], h['c'])
+    if len(html_buf) != h['os']:
+        raise RuntimeError('decompressed size mismatch')
+    return html_buf.decode('utf-8'), key
+
+
+def list_media(path, list_types, vlog):
+    pk, content = _parse_packed(path, vlog)
     items = []
 
     if pk is None:
-        if list_type == 'pack':
+        if 'pack' in list_types and 'media' not in list_types:
             return []
         html = read_text_file(path)
         items = _list_unpacked_html(html)
     else:
-        if list_type in ('all', 'media') or list_type in (
-                'images', 'videos', 'audio', 'fonts', 'docs'):
-            for e in pk.get('m', []):
+        for e in pk.get('m', []):
+            mime = e.get('t', '')
+            items.append({
+                'kind': 'data-uri', 'name': e.get('p', '?'),
+                'mime': mime, 'size': int(e.get('n', 0)),
+                'category': media_category(mime),
+                'source': 'media',
+            })
+        att = pk.get('att')
+        if att:
+            for e in att.get('m', []):
                 mime = e.get('t', '')
                 items.append({
-                    'kind': 'data-uri', 'name': e.get('p', '?'),
+                    'kind': 'bundle', 'name': e.get('k', ''),
                     'mime': mime, 'size': int(e.get('n', 0)),
                     'category': media_category(mime),
-                    'source': 'media',
+                    'source': 'pack',
                 })
-        if list_type in ('all', 'pack') or list_type in (
-                'images', 'videos', 'audio', 'fonts', 'docs'):
-            att = pk.get('att')
-            if att:
-                for e in att.get('m', []):
-                    mime = e.get('t', '')
-                    items.append({
-                        'kind': 'attachment', 'name': e.get('k', ''),
-                        'mime': mime, 'size': int(e.get('n', 0)),
-                        'category': media_category(mime),
-                        'source': 'pack',
-                    })
-            hid = pk.get('hid')
-            if hid:
-                for e in hid.get('m', []):
-                    name = e.get('k', '')
-                    mt, _ = mimetypes.guess_type(name)
-                    mt = mt or 'application/octet-stream'
-                    items.append({
-                        'kind': 'hidden', 'name': name, 'mime': mt,
-                        'size': int(e.get('n', 0)),
-                        'category': media_category(mt),
-                        'source': 'pack',
-                    })
+        hid = pk.get('hid')
+        if hid:
+            for e in hid.get('m', []):
+                name = e.get('k', '')
+                mt, _ = mimetypes.guess_type(name)
+                mt = mt or 'application/octet-stream'
+                items.append({
+                    'kind': 'hidden', 'name': name, 'mime': mt,
+                    'size': int(e.get('n', 0)),
+                    'category': media_category(mt),
+                    'source': 'pack',
+                })
+        # CSV blocks live inside the payload HTML
+        if 'csv' in list_types or 'all' in list_types:
+            try:
+                html, _key = _get_payload_html(pk, content, path, opts={})
+                items.extend(_list_from_payload_html(html))
+            except Exception as e:
+                vlog(f'note: cannot inspect payload for CSV: {e}')
 
-    if list_type == 'media':
-        items = [it for it in items if it['source'] == 'media']
-    elif list_type == 'pack':
-        items = [it for it in items if it['source'] == 'pack']
-    elif list_type in ('images', 'videos', 'audio', 'fonts', 'docs'):
-        items = [it for it in items if it['category'] == list_type]
-
+    items = [it for it in items if _item_matches_types(it, list_types)]
     order = {'media': 0, 'pack': 1}
     items.sort(key=lambda it: order.get(it['source'], 2))
     return items
@@ -2192,7 +2398,7 @@ def _print_listing(items):
     if pack_items:
         if not first:
             out('')
-        out(f"    {C['bold']}pack{C['reset']} {C['dim']}(from --attach)"
+        out(f"    {C['bold']}pack{C['reset']} {C['dim']}(from -b / --bundle)"
             f"{C['reset']}")
         _print_media_items(pack_items)
 
@@ -2206,13 +2412,14 @@ def _handle_list(opts, vlog):
         die('no input files to process')
 
     total = 0
+    types_str = ','.join(opts['list_types'])
     for f in files:
         label = os.path.basename(f)
         out('')
         out(f"  {C['bold']}{label}{C['reset']}  "
-            f"{C['dim']}(type={opts['list_type']}){C['reset']}")
+            f"{C['dim']}(types={types_str}){C['reset']}")
         try:
-            items = list_media(f, opts['list_type'], vlog)
+            items = list_media(f, opts['list_types'], vlog)
         except Exception as e:
             err(f'{label}: {e}')
             continue
@@ -2252,26 +2459,41 @@ def _decrypt_payload_or_die(pk, path, opts):
     return key
 
 
-def _decrypt_attachment_or_die(pk, path, opts):
+def _decrypt_bundle_or_die(pk, path, opts):
     if not pk.get('ae'):
         return None
-    if not opts['attach_password']:
-        opts['attach_password'] = prompt_hidden_password(
-            f"Attachment password for {os.path.basename(path)}: ")
-        if not opts['attach_password']:
-            raise RuntimeError('attachment password required')
-    key = derive_key(opts['attach_password'], pk['ae']['s'], pk['ae']['i'])
+    if not opts['bundle_password']:
+        opts['bundle_password'] = prompt_hidden_password(
+            f"Bundle password for {os.path.basename(path)}: ")
+        if not opts['bundle_password']:
+            raise RuntimeError('bundle password required')
+    key = derive_key(opts['bundle_password'], pk['ae']['s'], pk['ae']['i'])
     try:
         check = aes_gcm_decrypt(key, pk['ae']['ivc'],
                                 base64.b64decode(pk['ae']['ck']))
         if check != PASSWORD_CHECK:
-            raise RuntimeError('incorrect attachment password')
+            raise RuntimeError('incorrect bundle password')
     except Exception:
-        raise RuntimeError('incorrect attachment password')
+        raise RuntimeError('incorrect bundle password')
     return key
 
 
-def _extract_from_unpacked(path, dest, list_type, vlog):
+def _extract_csv_blocks(html, dest, list_types, vlog):
+    if not ('csv' in list_types or 'all' in list_types):
+        return 0
+    count = 0
+    for blk in _scan_csv_blocks(html):
+        body = blk['body']
+        if body and not body.endswith('\n'):
+            body += '\n'
+        name = blk['key'] + '.csv'
+        _write_extracted_file(os.path.join(dest, name),
+                              body.encode('utf-8'), vlog)
+        count += 1
+    return count
+
+
+def _extract_from_unpacked(path, dest, list_types, vlog):
     html = read_text_file(path)
     base = os.path.splitext(os.path.basename(path))[0]
     count = 0
@@ -2279,36 +2501,34 @@ def _extract_from_unpacked(path, dest, list_type, vlog):
         prefix = m.group(1)
         mime = prefix.replace(';base64', '')
         cat = media_category(mime)
-        if list_type not in ('all', 'media') and list_type != cat:
+        item = {'source': 'media', 'category': cat}
+        if not _item_matches_types(item, list_types):
             continue
         raw = b64_decode_lenient(m.group(2))
         ext = _EXT_BY_MIME.get(mime, '.bin')
         name = f'{base}_datauri_{i:04d}{ext}'
         _write_extracted_file(os.path.join(dest, name), raw, vlog)
         count += 1
+    count += _extract_csv_blocks(html, dest, list_types, vlog)
     return count
 
 
-def _extract_from_packed(path, pk, content, dest, list_type, opts, vlog):
+def _extract_from_packed(path, pk, content, dest, list_types, opts, vlog):
     base = os.path.splitext(os.path.basename(path))[0]
     count = 0
 
-    def wanted_mime(mime):
-        if list_type == 'all':
-            return True
-        if list_type == 'media':
-            return True
-        if list_type == 'pack':
-            return True
-        return media_category(mime) == list_type
+    def wanted(mime, source):
+        return _item_matches_types(
+            {'source': source, 'category': media_category(mime)},
+            list_types)
 
-    want_media = list_type in ('all', 'media', 'images', 'videos',
-                                'audio', 'fonts', 'docs')
-    want_pack = list_type in ('all', 'pack', 'images', 'videos',
-                              'audio', 'fonts', 'docs')
+    want_media = _item_matches_types(
+        {'source': 'media', 'category': 'images'}, list_types)
+    want_pack = _item_matches_types(
+        {'source': 'pack', 'category': 'images'}, list_types)
+    want_csv = 'csv' in list_types or 'all' in list_types
 
     payload_key = None
-    att_key = None
 
     if want_media and pk.get('b', {}).get('cs', 0) > 0:
         payload_key = _decrypt_payload_or_die(pk, path, opts)
@@ -2319,7 +2539,7 @@ def _extract_from_packed(path, pk, content, dest, list_type, opts, vlog):
             bin_blob = maybe_decompress(bin_blob, pk['a'], 1)
         for i, e in enumerate(pk['m']):
             mime = e.get('t', '')
-            if not wanted_mime(mime):
+            if not wanted(mime, 'media'):
                 continue
             data = bin_blob[e['o']:e['o'] + e['n']]
             ext = _EXT_BY_MIME.get(mime, '.bin')
@@ -2342,7 +2562,7 @@ def _extract_from_packed(path, pk, content, dest, list_type, opts, vlog):
                     att_raw = maybe_decompress(att_raw, pk['a'], 1)
                 for e in att.get('m', []):
                     mime = e.get('t', '')
-                    if not wanted_mime(mime):
+                    if not wanted(mime, 'pack'):
                         continue
                     data = att_raw[e['o']:e['o'] + e['n']]
                     name = e['k']
@@ -2356,21 +2576,29 @@ def _extract_from_packed(path, pk, content, dest, list_type, opts, vlog):
         if hid:
             hid_m = _HID_DATA_RE.search(content)
             if hid_m:
-                att_key = _decrypt_attachment_or_die(pk, path, opts)
+                bundle_key = _decrypt_bundle_or_die(pk, path, opts)
                 hid_raw = z85_decode(hid_m.group(1), hid['cs'])
-                hid_raw = aes_gcm_decrypt(att_key, pk['ae']['ivh'], hid_raw)
+                hid_raw = aes_gcm_decrypt(bundle_key, pk['ae']['ivh'],
+                                          hid_raw)
                 if hid.get('c'):
                     hid_raw = maybe_decompress(hid_raw, pk['a'], 1)
                 for e in hid.get('m', []):
                     name = e['k']
                     mt, _ = mimetypes.guess_type(name)
                     mt = mt or 'application/octet-stream'
-                    if not wanted_mime(mt):
+                    if not wanted(mt, 'pack'):
                         continue
                     data = hid_raw[e['o']:e['o'] + e['n']]
                     _write_extracted_file(os.path.join(dest, name),
                                           data, vlog)
                     count += 1
+
+    if want_csv:
+        try:
+            html, _key = _get_payload_html(pk, content, path, opts)
+            count += _extract_csv_blocks(html, dest, list_types, vlog)
+        except Exception as e:
+            vlog(f'note: cannot extract CSV from payload: {e}')
 
     return count
 
@@ -2396,11 +2624,17 @@ def _handle_extract(opts, vlog):
         try:
             pk, content = _parse_packed(f, vlog)
             if pk is None:
-                n = _extract_from_unpacked(f, dest, opts['extract_type'],
-                                           vlog)
+                if 'pack' in opts['extract_types'] and \
+                        'media' not in opts['extract_types'] and \
+                        'csv' not in opts['extract_types'] and \
+                        'all' not in opts['extract_types']:
+                    n = 0
+                else:
+                    n = _extract_from_unpacked(f, dest,
+                                               opts['extract_types'], vlog)
             else:
                 n = _extract_from_packed(f, pk, content, dest,
-                                         opts['extract_type'], opts, vlog)
+                                         opts['extract_types'], opts, vlog)
         except Exception as e:
             err(f'{label}: {e}')
             errors += 1
@@ -2474,7 +2708,7 @@ def status_line(idx, total, result):
             f"{name_pad} {C['yellow']}skipped (already packed){C['reset']}")
     elif result['status'] == 'skip-not-packed':
         out(f"  {C['gray']}{tag}{C['reset']} {C['yellow']}\u26a0{C['reset']} "
-            f"{name_pad} {C['yellow']}skipped (not a arcager file){C['reset']}")
+            f"{name_pad} {C['yellow']}skipped (not an arcager file){C['reset']}")
     elif result['status'] == 'skip-unknown-version':
         out(f"  {C['gray']}{tag}{C['reset']} {C['yellow']}\u26a0{C['reset']} "
             f"{name_pad} {C['yellow']}skipped (format v"
@@ -2497,7 +2731,7 @@ def _print_merge_report(merge_info, file_label):
     out('')
     out(f"    Inlined: {st.get('css', 0)} CSS \u00b7 {st.get('js', 0)} JS "
         f"\u00b7 {st.get('media', 0)} media \u00b7 {st.get('fonts', 0)} "
-        f"fonts \u00b7 1 HTML")
+        f"fonts \u00b7 {st.get('csv', 0)} CSV \u00b7 1 HTML")
 
     def _bullets(title, items, colour, extra=''):
         if not items:
@@ -2562,10 +2796,10 @@ def summary(results, elapsed_ms, opts):
 
     n_attached = sum(r.get('attached', 0) for r in ok)
     if n_attached:
-        rows.append(('Visible attachments', str(n_attached)))
+        rows.append(('Visible bundles', str(n_attached)))
     n_hidden = sum(r.get('hidden_count', 0) for r in ok)
     if n_hidden:
-        rows.append(('Hidden attachments', str(n_hidden)))
+        rows.append(('Hidden bundles', str(n_hidden)))
 
     rows.append(('Time', f'{elapsed_ms / 1000:.2f}s'))
 
@@ -2641,15 +2875,15 @@ def main():
                              ' '.join(str(x) for x in a) + '\n')
 
     # ---- password acquisition ----------------------------------------
-    hidden_paths = [a['path'] for a in opts['attach'] if a['hidden']]
+    hidden_paths = [a['path'] for a in opts['bundle'] if a['hidden']]
 
     if (opts['encrypt'] and not opts['unpack']
             and not opts['password']):
         opts['password'] = prompt_new_password('Payload password: ')
 
-    if hidden_paths and not opts['unpack'] and not opts['attach_password']:
-        opts['attach_password'] = prompt_new_password(
-            'Attachment password (hidden payload): ')
+    if hidden_paths and not opts['unpack'] and not opts['bundle_password']:
+        opts['bundle_password'] = prompt_new_password(
+            'Bundle password (hidden payload): ')
 
     if opts['minify']:
         if opts['lossy']:
@@ -2657,8 +2891,9 @@ def main():
                  "whitespace, sourcemaps); files packed with it cannot be "
                  "restored byte-exact by -u.")
         else:
-            warn("--minify modifies the payload (comments); files packed "
-                 "with it cannot be restored byte-exact by -u.")
+            warn("--minify runs Terser on the inline unpacker JS.  HTML "
+                 "payload is unchanged; use '-m lossy' to also minify "
+                 "the payload.")
     if opts['base_href']:
         warn("--base-href modifies the payload; files packed with it "
              "cannot be restored byte-exact by -u.")
@@ -2669,8 +2904,8 @@ def main():
         enc_label = '  \u00b7 encrypted' if opts['encrypt'] else ''
         hidden_label = (f"  \u00b7 hidden="
                         f"{len(hidden_paths)}" if hidden_paths else '')
-        vis_paths = [a['path'] for a in opts['attach'] if not a['hidden']]
-        vis_label = (f"  \u00b7 attach={len(vis_paths)}"
+        vis_paths = [a['path'] for a in opts['bundle'] if not a['hidden']]
+        vis_label = (f"  \u00b7 bundle={len(vis_paths)}"
                      if vis_paths else '')
         out(f"  {C['bold']}{C['cyan']}arcager {VERSION}{C['reset']}  "
             f"{C['dim']}\u00b7  merge  \u00b7  {opts['merge']}"
@@ -2716,8 +2951,8 @@ def main():
     enc_label = '  \u00b7 encrypted' if opts['encrypt'] else ''
     hidden_label = (f"  \u00b7 hidden={len(hidden_paths)}"
                     if hidden_paths else '')
-    vis_paths = [a['path'] for a in opts['attach'] if not a['hidden']]
-    vis_label = f"  \u00b7 attach={len(vis_paths)}" if vis_paths else ''
+    vis_paths = [a['path'] for a in opts['bundle'] if not a['hidden']]
+    vis_label = f"  \u00b7 bundle={len(vis_paths)}" if vis_paths else ''
 
     out(f"  {C['bold']}{C['cyan']}arcager {VERSION}{C['reset']}  "
         f"{C['dim']}\u00b7  {'unpack' if opts['unpack'] else 'pack'}  "

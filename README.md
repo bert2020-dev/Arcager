@@ -1,6 +1,6 @@
 # Arcager
 
-**Single-file HTML packer.** Bundle a page — or an entire static site — into one portable `.html` that unpacks itself in the browser. Optionally encrypt it, attach media, or hide arbitrary files inside an encrypted payload.
+**Single-file HTML packer.** Bundle a page — or an entire static site — into one portable `.html` that unpacks itself in the browser. Optionally encrypt it, attach media, hide arbitrary files inside an encrypted payload, or inline tabular data.
 
 [![License: PolyForm Noncommercial 1.0.0](https://img.shields.io/badge/license-PolyForm%20Noncommercial%201.0.0-blue.svg)](LICENSE.txt)
 [![Python](https://img.shields.io/badge/python-3.8%2B-blue.svg)](https://www.python.org/)
@@ -15,19 +15,18 @@
 - Embedded `data:` URIs, hoisted into a separate binary blob so they don't inflate the page.
 - A tiny inline JavaScript unpacker that reassembles everything at load time using the browser's built-in `DecompressionStream`.
 - Optional **visible bundles** (images, fonts, audio, video, documents) exposed to the page as `arcager.images`.
+- Optional **inlined CSV data** exposed as `arcager.csv`.
 - Optional **hidden encrypted payloads** that the browser never touches.
 
 The result is one file you can email, host, drop on a USB stick, or serve from anywhere. No server required.
 
-**Version 3.1.0** changes from earlier releases:
+**Version 3.2.0** changes from earlier releases:
 
-- `-b` / `--bundle` replaces `-a` / `--attach`.
-- `--bundle-password` replaces `--attach-password`.
-- `--prefix PREFIX` customizes pack/merge output names (default: `packed_`).
-- `-l` and `-x` accept comma-separated type lists (e.g. `images,videos`).
-- Multiple `-b` flags accumulate; visible and hidden can be mixed freely.
-- Minify no longer strips HTML comments by default; use `-m lossy` for that.
-- Encrypted zip archives are detected and refused, with a hint to use hidden bundling.
+- CSV/TSV inlining via `<link rel="csv" href="data.csv">` during `--merge`. At runtime: `window.arcager.csv['key'].rows` / `.data`.
+- `-l csv` and `-x csv` scan and extract inlined CSV blocks.
+- `-M` is a short option for `--merge`.
+- `window.arcager` is always defined after load (empty when no bundles or CSV are present).
+- Earlier 3.1 changes: `-b` / `--bundle` replaces `-a` / `--attach`; `--bundle-password` replaces `--attach-password`; `--prefix`; comma-separated type lists for `-l`/`-x`; multiple `-b` flags; minify no longer strips HTML comments by default (`-m lossy` for that); encrypted zip archives are refused for visible bundles.
 
 ---
 
@@ -38,6 +37,7 @@ The result is one file you can email, host, drop on a USB stick, or serve from a
 - [Quick Start](#quick-start)
 - [Command Modes](#command-modes)
 - [Bundles](#bundles)
+- [CSV & Tabular Data](#csv--tabular-data)
 - [Encryption](#encryption)
 - [Compression](#compression)
 - [Examples](#examples)
@@ -54,8 +54,8 @@ The result is one file you can email, host, drop on a USB stick, or serve from a
 | Use case | What arcager gives you |
 |---|---|
 | **Deliver a report to a client** | One `.html` file, optionally password-protected. No assets to lose. |
-| **Archive a static site** | Entire site — HTML, CSS, JS, fonts, images — in one file, ~20% of original size. |
-| **Ship a demo** | A page with an image library baked in, loadable offline. |
+| **Archive a static site** | Entire site — HTML, CSS, JS, fonts, images, CSV — in one file, ~20% of original size. |
+| **Ship a demo** | A page with an image library or tabular data baked in, loadable offline. |
 | **Exchange secret files** | A normal-looking HTML cover page with an encrypted payload only the recipient can open. |
 | **Nest bundles** | Pack a packed file. Russian dolls all the way down. |
 
@@ -108,12 +108,16 @@ python arcager.py -b ./flags page.html
 python arcager.py -b secret.zip hidden cover.html
 
 # Merge a whole static site into one file
-python arcager.py --merge ./docs --brotli -m
+python arcager.py -M ./docs -m
+
+# Inline tabular data (source has <link rel="csv" href="elements.csv">)
+python arcager.py -M ./site
+# runtime: arcager.csv['elements'].data
 
 # Unpack back to HTML
 python arcager.py -u packed_report.html
 
-# Inspect a bundle (no password required)
+# Inspect a bundle (no password required for most listings)
 python arcager.py -l packed_flags.html
 
 # Extract hidden payloads
@@ -130,8 +134,8 @@ python arcager.py -x pack -O ./out packed_cover.html
 |---|---|---|
 | **pack** | `arcager [options] <input...>` | Pack HTML files into `packed_<name>.html` (or custom `--prefix`). |
 | **unpack** | `arcager -u [options] <input...>` | Reverse a packed file back to HTML. Byte-exact for non-lossy packings. |
-| **merge** | `arcager --merge <dir> [options]` | Flatten a whole directory (entry point `index.html`) into one file. |
-| **list** | `arcager -l [TYPE,...] <input...>` | List media inside a packed or unpacked HTML file. No password needed. |
+| **merge** | `arcager -M <dir>` or `--merge <dir>` | Flatten a whole directory (entry point `index.html`) into one file. Inlines CSS, JS, fonts, media, and CSV. |
+| **list** | `arcager -l [TYPE,...] <input...>` | List media inside a packed or unpacked HTML file. Metadata listing needs no password. |
 | **extract** | `arcager -x [TYPE,...] <input...> [-O DIR]` | Extract media into an output directory. Prompts for passwords as needed. |
 
 ### `-l` / `-x` types
@@ -141,15 +145,16 @@ python arcager.py -x pack -O ./out packed_cover.html
 | `all` | Everything (default) |
 | `media` | Hoisted `data:` URIs from the payload HTML |
 | `pack` | Bundles — visible *and* hidden |
+| `csv` | Inlined CSV data blocks |
 | `images` `videos` `audio` `fonts` `docs` | Filter by category (works across media + pack) |
 
-Types can be comma-separated, e.g. `-l images,videos` or `-x pack,docs`.
+Types can be comma-separated, e.g. `-l images,videos` or `-x pack,docs,csv`.
 
 ---
 
 ## Bundles
 
-`-b PATH [hidden]` (or `--bundle`) adds files to the bundle. It can be given multiple times. Visible and hidden bundles can be mixed in the same pack.
+`-b PATH [hidden]` (or `--bundle`) adds files to the pack. It can be given multiple times. Visible and hidden bundles can be mixed in the same pack.
 
 ### Visible bundles — `-b PATH`
 
@@ -169,6 +174,7 @@ Media is decompressed in the browser and exposed to your page as `arcager.images
 - **Audio:** `mp3 ogg oga wav m4a aac flac opus`
 - **Video:** `mp4 m4v webm ogv mov`
 - **Documents:** `html htm xhtml pdf eps txt md markdown`
+- **Data:** `csv tsv`
 
 Total uncompressed cap: **128 MB**.
 
@@ -191,7 +197,7 @@ Keys are the file's relative path with the extension stripped, using forward sla
 
 HTML/PDF/XHTML files inside an archive are exposed as `blob:` URLs so they can be loaded inside `<iframe>` elements.
 
-When `-E` is used, visible bundles are encrypted with the payload password so the entire bundle stays opaque.
+When `-E` is used, visible bundles are encrypted with the payload password so the entire pack stays opaque.
 
 ### Hidden bundles — `-b PATH hidden`
 
@@ -207,6 +213,79 @@ Hidden bundles use their own password, independent from the payload password. If
 
 > [!TIP]
 > Because hidden bundles are encrypted with a bundle password and can coexist with any pack output, they're useful for exchanging secret files between consenting parties: the cover page loads cleanly for anyone, and only those with the bundle password can extract the payload.
+
+---
+
+## CSV & Tabular Data
+
+`arcager` can inline CSV files into the packed HTML during `--merge`, and expose them to your page as `arcager.csv` at runtime.
+
+### How to use it
+
+In your source HTML, reference the CSV just like a stylesheet:
+
+```html
+<link rel="csv" href="data/elements.csv">
+```
+
+During `--merge`, arcager reads the file, escapes any `</script>` in the content, and replaces the `<link>` with:
+
+```html
+<script type="text/csv" data-key="elements">
+symbol,name,atomic_number
+H,Hydrogen,1
+He,Helium,2
+...
+</script>
+```
+
+The `data-key` is derived from the file's basename with any non-word characters replaced by underscores. So `data/elements.csv` becomes `data-key="elements"`.
+
+At runtime, the blocks are parsed automatically on load:
+
+```javascript
+await arcager.ready;
+
+arcager.csv['elements'].rows
+// [['symbol','name','atomic_number'], ['H','Hydrogen','1'], ...]
+
+arcager.csv['elements'].data
+// [{symbol:'H', name:'Hydrogen', atomic_number:'1'}, ...]
+```
+
+- `.rows` is an array of arrays (raw, header row first).
+- `.data` is an array of objects keyed by the first row's headers.
+
+### Advantages over hard-coded data
+
+A CSV file in a static site normally needs a `fetch()` at runtime, which fails for local files opened via `file://` and adds a network round-trip. Inlining removes both problems: the page is self-contained and the data is available the moment the page loads. You can keep the source CSV as an editable file in your repo — no build step required to change a row.
+
+### Parser scope
+
+The parser is RFC 4180-compliant for the common cases:
+
+- Comma delimiter (fixed).
+- Quoted fields (`"like this"`).
+- Escaped quotes inside quoted fields (`"say ""hi"""`).
+- Embedded commas and newlines inside quoted fields.
+- CRLF and LF line endings.
+- Optional trailing newline.
+- Header row auto-detected from the first row.
+
+It does **not** handle: delimiters other than comma, BOM stripping, type coercion (every field is a string), or streaming large files. Pre-process if you need those, or extract with `-x csv` and use a full library.
+
+### Listing and extracting CSV
+
+CSV blocks appear under the `csv` type and the `media` source:
+
+```bash
+python arcager.py -l csv packed_table.html
+python arcager.py -x csv -O ./out packed_table.html
+```
+
+Each block is written to `<data-key>.csv` in the destination folder.
+
+Listing CSV from a packed file requires decompressing the payload. If the file is encrypted, `-l csv` will prompt for the payload password (metadata-only listings like `-l images` do not).
 
 ---
 
@@ -232,7 +311,7 @@ python arcager.py -E -b ./flags -b secret.zip hidden page.html
 - AES-256-GCM authenticated encryption
 - PBKDF2-SHA256, 600,000 iterations
 - Separate salts and IVs for payload and bundle
-- Wrong-password detection via an encrypted canary — clean *"Incorrect password."* message, never a decryption crash
+- Wrong-password detection via an encrypted canary — clean *"Incorrect password."* message
 
 > [!IMPORTANT]
 > Encrypted payloads require a **secure context**: `https://`, `file://`, or `localhost`. `crypto.subtle` is not exposed on plain `http://` origins.
@@ -255,6 +334,7 @@ Already-compressed files (PNG, JPEG, MP4, ZIP, 7z, WOFF2, PDF, DOCX, …) are **
 
 - **Brotli (quality 11)** typically saves another 10–20% on text but requires Chrome 105+.
 - **Hoisting `data:` URIs** into a binary blob is worth 30–50% on pages with many embedded images.
+- **Inlined CSV** is highly compressible and typically shrinks to 15–25% of original size.
 - **Files under ~8 KB grow** because the shell is a fixed ~3–4 KB overhead. Use `-m` to trim.
 - **Encryption** adds a few hundred bytes of metadata, no meaningful size change.
 
@@ -265,7 +345,7 @@ Already-compressed files (PNG, JPEG, MP4, ZIP, 7z, WOFF2, PDF, DOCX, …) are **
 ### Deliver a password-protected report to a client
 
 ```bash
-python arcager.py -E --brotli -m \
+python arcager.py -E --brotli -m lossy \
     --base-href https://reports.example.com/ \
     q3_report.html
 ```
@@ -275,7 +355,7 @@ The client opens `packed_q3_report.html`, gets a password prompt, enters the pas
 ### Bundle a static site into one file
 
 ```bash
-python arcager.py --merge ./docs --brotli -m
+python arcager.py -M ./docs -m
 ```
 
 Scans `./docs/`, finds `./docs/index.html`, inlines local CSS, JS, fonts, images and icons, and writes `packed_docs.html` alongside the `docs/` folder. Review the merge report to see what could not be flattened.
@@ -286,7 +366,7 @@ Scans `./docs/`, finds `./docs/index.html`, inlines local CSS, JS, fonts, images
 python arcager.py -b ./flags page.html
 ```
 
-Every image in `./flags` becomes available at runtime. A reference like `<img src="flags/ge.png">` in `page.html` is rewritten to the in-memory bundle.
+Every image in `./flags` becomes available at runtime. A reference like `<img src="flags/ge.png">` is rewritten to the in-memory bundle.
 
 ```javascript
 await arcager.ready;
@@ -294,6 +374,30 @@ const flag = arcager.images['ge'];      // data URL
 const img  = arcager.getImage('ge');    // <img> element
 document.body.appendChild(img);
 ```
+
+### Inline CSV data for a periodic table
+
+```bash
+# Source layout:
+#   site/
+#     index.html
+#     data/elements.csv
+#
+# index.html contains:
+#   <link rel="csv" href="data/elements.csv">
+
+python arcager.py -M ./site
+```
+
+```javascript
+await arcager.ready;
+const grid = document.getElementById('grid');
+for (const el of arcager.csv['elements'].data) {
+  grid.innerHTML += '<div>' + el.symbol + '</div>';
+}
+```
+
+The CSV stays editable in your repo. Changing a row and re-running arcager.py repacks the page with the new data. No `fetch()`, no server, no build step.
 
 ### Hide arbitrary files inside a normal-looking page
 
@@ -323,30 +427,32 @@ python arcager.py -x all -O ./out --password PW \
     --bundle-password BPW packed_page.html
 ```
 
-### Inspect what a bundle contains
+### Inspect what a pack contains
 
 ```bash
 python arcager.py -l packed_flags.html
 python arcager.py -l images packed_flags.html
+python arcager.py -l images,videos,fonts packed_media.html
+python arcager.py -l csv packed_table.html
 python arcager.py -l pack packed_cover.html
-python arcager.py -l images,videos packed_media.html
 ```
 
-No password needed — metadata is unencrypted.
+No password is needed for `-l` on unencrypted payloads. For encrypted payloads, `-l csv` prompts once because it must decompress the HTML to find the CSV blocks.
 
-### Extract media for auditing or reuse
+### Extract media or CSV for auditing or reuse
 
 ```bash
 python arcager.py -x all -O ./out packed_flags.html
-python arcager.py -x pack -O ./secret packed_cover.html
+python arcager.py -x pack,images -O ./secret packed_cover.html
+python arcager.py -x csv -O ./data packed_table.html
 ```
 
-Files land under `./out/` (or `./secret/`), one subfolder per input when extracting from multiple files.
+Files land under the chosen directory, one subfolder per input when extracting from multiple files.
 
 ### Batch-pack a directory tree
 
 ```bash
-python arcager.py -r ./public --brotli -m -f
+python arcager.py -r ./public --brotli -m lossy -f
 ```
 
 Every `.html` under `./public/` (recursively) is packed into `packed_<name>.html` in the same folder.
@@ -355,9 +461,11 @@ Every `.html` under `./public/` (recursively) is packed into `packed_<name>.html
 
 ```bash
 python arcager.py --prefix mypack_ page.html
-```
+# → mypack_page.html
 
-Produces `mypack_page.html` instead of `packed_page.html`. The same prefix is recognized when unpacking.
+python arcager.py --prefix mypack_ -M ./docs
+# → mypack_docs.html
+```
 
 ### Keep small vector assets inline
 
@@ -381,18 +489,16 @@ Large base64 PNGs and JPEGs are hoisted into the binary blob. Tiny SVGs and GIFs
 -o, --output PATH       Exact output file (single input, or --merge).
 -O, --output-dir DIR    Output directory for any mode. Auto-created.
                         For -x, this is the extraction destination.
+--prefix PREFIX         Prefix for pack/merge output names.
+                        Defaults to 'packed_'. Also stripped during unpack.
 -f, --force             Overwrite output without prompting.
 -r, --recursive         Recurse into subdirectories when scanning.
---prefix PREFIX         Prefix for pack/merge output names.
-                        Defaults to 'packed_'. Also used to strip
-                        the prefix when unpacking a file packed
-                        with --prefix.
 ```
 
 ### Compression
 ```
 --brotli                Use Brotli instead of gzip (Chrome 105+ only).
--m, --minify [lossy]    Minify the unpacker JS (via Terser on PATH).
+-m, --minify [lossy]    Run Terser on the inline unpacker JS.
                         Add 'lossy' to ALSO strip HTML comments,
                         collapse inter-tag whitespace, and remove
                         sourceMappingURL comments from the payload.
@@ -431,7 +537,11 @@ Large base64 PNGs and JPEGs are hoisted into the binary blob. Tiny SVGs and GIFs
 
 ### Merge
 ```
---merge DIR             Bundle a whole directory into one file.
+-M, --merge DIR         Bundle a whole directory into one file.
+                        Inlines CSS, JS, fonts, media, and CSV.
+                        <link rel="csv" href="data.csv"> becomes a
+                        <script type="text/csv"> block exposed at
+                        runtime as arcager.csv.
 ```
 
 ### List / Extract
@@ -441,7 +551,7 @@ Large base64 PNGs and JPEGs are hoisted into the binary blob. Tiny SVGs and GIFs
 -x, --extract [TYPE,...]       Extract into an output directory.
                                TYPE as for -l.
 
-TYPE: all | media | pack | images | videos | audio | fonts | docs
+TYPE: all | media | pack | csv | images | videos | audio | fonts | docs
 ```
 
 ### Misc
@@ -487,8 +597,18 @@ TYPE: all | media | pack | images | videos | audio | fonts | docs
 - A `<base>` tag in the source produces a warning; relative URL resolution may be wrong.
 - Runtime-built URLs (`img.src = 'pic' + n + '.png'`) cannot be resolved.
 - CSS inside JS strings (styled-components, CSS-in-JS) is not scanned.
-- Individual media files larger than 64 MB are skipped (`_MERGE_MAX_INLINE_BYTES` in source).
+- Individual media files larger than 64 MB are skipped.
 - Symlinks are followed but not normalized; cyclic symlinks can cause repeated reads.
+
+</details>
+
+<details>
+<summary><strong>CSV data</strong></summary>
+
+- Comma delimiter only. TSV files are accepted by the merge scanner but currently parsed with the comma delimiter (producing a single-column result); convert to CSV first.
+- Header row is always the first row.
+- All fields are strings (no type coercion).
+- No BOM stripping, alternate encodings, or streaming of very large files.
 
 </details>
 
@@ -503,17 +623,11 @@ TYPE: all | media | pack | images | videos | audio | fonts | docs
 </details>
 
 <details>
-<summary><strong>Format</strong></summary>
+<summary><strong>Format & size</strong></summary>
 
-- Packed files begin with the sentinel `<!--arcager:3-->`. Files without this sentinel are refused by `-u` with *"not a arcager file"*.
+- Packed files begin with the sentinel `<!--arcager:3-->`. Files without this sentinel are refused by `-u`.
 - Version 3 is not compatible with earlier 1.x or 2.x bundles. Repack older files with the current tool.
-
-</details>
-
-<details>
-<summary><strong>Size</strong></summary>
-
-The whole payload is held in memory during pack and unpack.
+- The whole payload is held in memory during pack and unpack.
 
 </details>
 
@@ -532,7 +646,9 @@ The whole payload is held in memory during pack and unpack.
 | `--brotli requires the 'brotli' package` | `pip install brotli` |
 | `terser not found on PATH` | `npm install -g terser`. Packing still works without it; only the JS squeeze is skipped. |
 | Merge report lists "unmergeable" entries | These are `<a href>` or `<iframe src>` pointing at other local `.html` files, which cannot be flattened into a single document. |
-| Merge report lists "missing" entries | Run with `-v` to see the resolved path. Common causes: case mismatch, URL-encoded characters, dynamically-built URLs, or a `<base>` tag. |
+| Merge report lists "missing" entries | Run with `-v` to see the resolved path. Common causes: case mismatch, URL-encoded characters, dynamically-built URLs, or a `<base>` tag. Also includes missing CSV files referenced by `<link rel="csv">`. |
+| CSV data is empty in the browser | Check that the `<link rel="csv">` was inside the entry `index.html`, the data-key matches the basename, the merge report did not list it under "missing", and you awaited `arcager.ready`. |
+| CSV parses as a single column | Source is likely tab-separated. Convert to comma-separated first. |
 | `output would overwrite input` | `-o` points at the input file. Choose a different output path. |
 | `hidden bundles require a bundle password` | Pass `--bundle-password` or run interactively. |
 | Encrypted zip archive encountered | Decrypt it first, or bundle the archive as-is with: `-b archive.zip hidden` |
