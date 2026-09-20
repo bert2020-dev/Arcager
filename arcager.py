@@ -18,6 +18,36 @@ Modes:
     -l        list media inside a packed or unpacked HTML file
     -x        extract media or bundles from a packed or unpacked file
 
+New in 3.2.3:
+    - arcager.state ('loading' | 'ready' | 'error') and arcager.error are
+      exposed.  window.arcager.ready still resolves only after the
+      payload has been decompressed and every CSV block has been parsed,
+      but applications that prefer to poll can now read arcager.state
+      and distinguish "still loading" from "failed".  arcager.loaded
+      remains as a boolean mirror of state==='ready'.  The state flag
+      and the ready Promise are updated in the same synchronous
+      statement, so they can never disagree.
+
+New in 3.2.2:
+    - window.arcager and window.arcager.ready are now defined before any
+      capability check.  If the browser lacks DecompressionStream, or an
+      encrypted payload is opened outside a secure context, ready
+      rejects with a clear Error instead of leaving window.arcager
+      undefined.  Applications may always write
+          try { await arcager.ready; } catch (e) { ... }
+      without a guard.  arcager.loaded is added as a synchronous
+      boolean convenience (true exactly when ready has resolved).
+
+New in 3.2.1:
+    - window.arcager.ready is now a real pending Promise.  It resolves
+      only after the payload HTML has been decompressed AND every
+      inlined <script type="text/csv"> block has been parsed.  In 3.2.0
+      loadCSVBlocks() queried the shell document (which never contains
+      CSV blocks) and ready was resolved before the payload was read,
+      so arcager.csv was always {}.  Applications may now safely do
+      `await arcager.ready` before reading arcager.csv[...] or
+      arcager.images[...].
+
 New in 3.2.0:
     - CSV/TSV inlining via <link rel="csv" href="data.csv"> during --merge.
       At runtime: window.arcager.csv['key'].rows / .data
@@ -95,7 +125,7 @@ for _s in (sys.stdout, sys.stderr):
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-VERSION   = '3.2.0'
+VERSION   = '3.2.3'
 SIGNATURE = '<!--arcager:3-->'
 SIG_RE    = re.compile(r'^<!--arcager:(\d+)-->')
 
@@ -1096,8 +1126,44 @@ var LDR=document.getElementById('__ldr');
 var TOTAL=(D.h.cs + (D.b?D.b.cs:0))||1;
 function setP(p){if(p<0)p=0;if(p>100)p=100;if(LAB)LAB.textContent='Unpacking HTML\u2026 '+Math.floor(p)+'%';if(FILL)FILL.style.width=p+'%';}
 function fail(m){if(LAB)LAB.textContent='Failed to unpack';if(ERR)ERR.textContent=String((m&&m.message)||m);if(window.console)console.error(m);}
-if(typeof DecompressionStream==='undefined'){fail('DecompressionStream is not supported by this browser.');return}
-if(ENC&&(!window.crypto||!window.crypto.subtle)){fail('Encrypted bundles require a secure context (https://, file://, or localhost).');return}
+
+// Public API.  window.arcager always exists, and arcager.ready is always
+// a genuine Promise.  arcager.state transitions from 'loading' to
+// either 'ready' or 'error'; arcager.loaded mirrors 'ready'.  The
+// ready Promise resolves in the same statement that sets state='ready',
+// so any code that sees loaded===true, state==='ready', or has awaited
+// the Promise observes fully populated arcager.images and arcager.csv.
+var resolveReady,rejectReady;
+var readyPromise=new Promise(function(res,rej){resolveReady=res;rejectReady=rej;});
+window.arcager={
+  state:'loading',
+  error:null,
+  images:{},
+  csv:{},
+  loaded:false,
+  getImage:function(k){
+    var imgs=window.arcager.images;
+    if(!imgs||k===undefined||k===null)return null;
+    var v=imgs[k]||imgs[String(k).toLowerCase()];
+    if(!v)return null;
+    var img=new Image();img.src=v;return img;
+  },
+  ready:readyPromise
+};
+
+if(typeof DecompressionStream==='undefined'){
+  var _e1=new Error('DecompressionStream is not supported by this browser.');
+  window.arcager.state='error';
+  window.arcager.error=_e1;
+  fail(_e1); rejectReady(_e1); return;
+}
+if(ENC&&(!window.crypto||!window.crypto.subtle)){
+  var _e2=new Error('Encrypted bundles require a secure context (https://, file://, or localhost).');
+  window.arcager.state='error';
+  window.arcager.error=_e2;
+  fail(_e2); rejectReady(_e2); return;
+}
+
 var AZ="0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ.-:+=^!/*?&<>()[]{}@%$#",ZM={};
 for(var zi=0;zi<85;zi++)ZM[AZ.charCodeAt(zi)]=zi;
 function z85d(s,size){s=s.replace(/\s+/g,'');var o=new Uint8Array(size),k=0;for(var i=0;i+5<=s.length&&k<size;i+=5){var v=0;for(var j=0;j<5;j++){var d=ZM[s.charCodeAt(i+j)];if(d===undefined)throw new Error('bad z85 char at '+i);v=v*85+d}if(k<size)o[k++]=Math.floor(v/16777216)%256;if(k<size)o[k++]=Math.floor(v/65536)%256;if(k<size)o[k++]=Math.floor(v/256)%256;if(k<size)o[k++]=v%256;}return o;}
@@ -1243,15 +1309,26 @@ function csvToObjects(rows){
   }
   return out;
 }
-function loadCSVBlocks(){
-  var blocks=document.querySelectorAll('script[type="text/csv"]');
-  if(!blocks.length)return null;
-  var csv={};
-  for(var i=0;i<blocks.length;i++){
-    var el=blocks[i];
-    var key=el.getAttribute('data-key')||('csv'+i);
-    var delim=el.getAttribute('data-delim')||',';
-    var rows=parseCSV(el.textContent||'',delim);
+function scanCSVFromString(html){
+  var re=/<script\b([^>]*)>([\s\S]*?)<\/script\s*>/gi;
+  var typeRe=/\btype\s*=\s*(['"])text\/csv\1/i;
+  var keyRe=/\bdata-key\s*=\s*(['"])([^'"]+)\1/i;
+  var delimRe=/\bdata-delim\s*=\s*(['"])([^'"]+)\1/i;
+  var csv={},idx=0,m;
+  while((m=re.exec(html))!==null){
+    var attrs=m[1]||'';
+    if(!typeRe.test(attrs))continue;
+    var km=keyRe.exec(attrs);
+    var dm=delimRe.exec(attrs);
+    var key=km?km[2]:('csv'+idx);
+    var delim=dm?dm[2]:',';
+    idx++;
+    var body=m[2];
+    if(body.substring(0,2)==='\r\n')body=body.substring(2);
+    else if(body.charAt(0)==='\n')body=body.substring(1);
+    if(body.length&&body.charAt(body.length-1)==='\n')body=body.substring(0,body.length-1);
+    if(body.length&&body.charAt(body.length-1)==='\r')body=body.substring(0,body.length-1);
+    var rows=parseCSV(body,delim);
     csv[key]={rows:rows,data:csvToObjects(rows)};
   }
   return csv;
@@ -1276,18 +1353,6 @@ function loadCSVBlocks(){
         IMAGES=null;
       }
     }
-    var CSV=loadCSVBlocks();
-    window.arcager={
-      images:IMAGES||{},
-      csv:CSV||{},
-      getImage:function(k){
-        if(!IMAGES||k===undefined||k===null)return null;
-        var v=IMAGES[k]||IMAGES[String(k).toLowerCase()];
-        if(!v)return null;
-        var img=new Image();img.src=v;return img;
-      },
-      ready:Promise.resolve({images:IMAGES||{},csv:CSV||{}})
-    };
     await whenParsed();
     var hzBytes=z85d(D.h.z,D.h.cs);
     if(KEY&&D.pe&&D.pe.iv1)hzBytes=await decBytes(KEY,D.pe.iv1,hzBytes);
@@ -1300,8 +1365,19 @@ function loadCSVBlocks(){
       for(var i=0;i<D.m.length;i++){var e=D.m[i];html=html.replace(e.p,(function(ee,sl){return function(){return 'data:'+ee.t+';base64,'+b64(sl);};})(e,bb.subarray(e.o,e.o+e.n)));}
     }
     if(IMAGES)html=remapHTML(html,IMAGES);
+    var CSV=scanCSVFromString(html);
+    window.arcager.images=IMAGES||{};
+    window.arcager.csv=CSV;
+    window.arcager.state='ready';
+    window.arcager.loaded=true;
+    resolveReady({images:window.arcager.images,csv:window.arcager.csv});
     setP(100);commit(html);
-  }catch(x){fail(x)}
+  }catch(x){
+    window.arcager.state='error';
+    window.arcager.error=x;
+    try{rejectReady(x);}catch(e){}
+    fail(x);
+  }
 })();
 })();'''
 
