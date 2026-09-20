@@ -1,6 +1,6 @@
 ================================================================================
   arcager — Single-file HTML packer
-  Version 3.2.0
+  Version 3.2.3
   Last updated: 2026-11-18
 ================================================================================
 
@@ -53,7 +53,7 @@
 
       # index.html contains:  <link rel="csv" href="elements.csv">
       python arcager.py -M ./site
-      # runtime:  arcager.csv['elements'].data
+      # runtime:  await arcager.ready; arcager.csv['elements'].data
 
   Unpack back to HTML:
 
@@ -96,6 +96,66 @@
   With -M, a directory can be flattened into one file: local CSS and JS
   are inlined, fonts and media are converted to data URIs, and CSV files
   referenced via <link rel="csv"> become inline data blocks.
+
+  NEW IN 3.2.3
+
+    window.arcager now exposes a small state machine so applications
+    can inspect readiness without awaiting a Promise:
+
+        arcager.state    'loading' | 'ready' | 'error'
+        arcager.error    Error object when state==='error', else null
+        arcager.loaded   boolean, true iff state==='ready'
+        arcager.ready    Promise, resolves when state becomes 'ready'
+                         and rejects when state becomes 'error'
+
+    state is set to 'ready' in the same statement that resolves
+    arcager.ready and populates arcager.images / arcager.csv, so any
+    of the three signals — state==='ready', loaded===true, or
+    `await arcager.ready` — is authoritative.  Applications that prefer
+    polling can do so without awaiting:
+
+        if (arcager.state === 'ready') { ... }
+        else if (arcager.state === 'error') { console.error(arcager.error); }
+        else { /* still loading */ }
+
+    Under the hood, arcager.ready uses exactly this state to decide when
+    to resolve, so the Promise and the flags can never disagree.
+
+  NEW IN 3.2.2
+
+    window.arcager and window.arcager.ready are defined before any
+    capability check.  If the browser lacks DecompressionStream, or an
+    encrypted payload is opened outside a secure context, ready
+    rejects with a clear Error instead of leaving window.arcager
+    undefined.  Applications may always write
+        try { await arcager.ready; } catch (e) { ... }
+    without a guard.  arcager.loaded is added as a synchronous
+    boolean convenience (true exactly when ready has resolved).
+
+  NEW IN 3.2.1
+
+    window.arcager.ready is now a real pending Promise.  It resolves
+    only after the payload HTML has been decompressed AND every
+    inlined <script type="text/csv"> block has been parsed.
+
+    In 3.2.0, arcager.csv was always {}.  The unpacker scanned the
+    shell document for CSV blocks (which never exist there — CSV blocks
+    live inside the compressed payload), and arcager.ready resolved
+    before the payload had been read.  Applications that did
+
+        await arcager.ready;
+        arcager.csv['elements'].data
+
+    got undefined.  This release fixes both problems:
+
+      * CSV blocks are scanned from the decompressed payload string,
+        not the shell document.
+      * window.arcager is populated (images + csv) and its ready
+        Promise is resolved immediately before the payload is committed
+        to the document, so scripts inside the payload can rely on it.
+
+    No pack format change — files packed by 3.2.0 still unpack, they
+    just need to be repacked if you want working arcager.csv at runtime.
 
 
 ================================================================================
@@ -257,6 +317,11 @@
       arcager.getImage('ge')          // returns an HTMLImageElement
       arcager.getImage('flags/ge')
 
+  `arcager.ready` is a real pending Promise.  It resolves only after
+  the payload has been decompressed and every inlined CSV block has
+  been parsed.  Reading arcager.images or arcager.csv before that
+  point returns empty objects, so always await it first.
+
   Keys are the file's relative path with the extension stripped, using
   forward slashes.  When a bare basename is unique across the whole
   bundle set, a short alias is added (so 'ge' works when there is
@@ -337,6 +402,51 @@
   .rows is an array of arrays (raw, header row first).
   .data is an array of objects keyed by the first row's headers.
 
+  ── THE READY CONTRACT ───────────────────────────────────────────────
+
+  window.arcager is defined synchronously by the inline unpacker, before
+  any capability check or asynchronous work.  Three signals are exposed,
+  and they cannot disagree because they are set in the same statement:
+
+      arcager.ready     Promise.  Resolves once the payload HTML has
+                        been decompressed and every inlined
+                        <script type="text/csv"> block has been parsed
+                        and turned into arcager.csv[key].{rows,data}.
+                        Rejects if the pack fails to load.
+      arcager.state     'loading' | 'ready' | 'error'.  Synchronous
+                        snapshot.  'ready' is set at the same instant
+                        the Promise resolves.
+      arcager.loaded    Boolean convenience, mirrors state==='ready'.
+      arcager.error     Error when state==='error', else null.
+
+  Recommended usage:
+
+      try {
+        await arcager.ready;
+        // arcager.state === 'ready' and arcager.loaded === true here
+        const rows = arcager.csv['elements'].rows;
+      } catch (e) {
+        console.error('arcager failed to load:', e);
+      }
+
+  Polling usage (no await):
+
+      switch (arcager.state) {
+        case 'ready':  useData(arcager.csv); break;
+        case 'error':  console.error(arcager.error); break;
+        default:       /* 'loading' — try again later */ break;
+      }
+
+  Rejection reasons: unsupported browser (no DecompressionStream),
+  missing secure context for an encrypted payload, incorrect password,
+  or a decompression error.  The same message is shown in the loader
+  panel.
+
+  Reading arcager.csv[...] or arcager.images[...] while state is
+  'loading' returns empty objects.  The Promise resolves *before* the
+  payload is committed to the document, so scripts inside the payload
+  itself can also `await arcager.ready` and get fully populated data.
+
   ── ADVANTAGES OVER HARD-CODED DATA ──────────────────────────────────
 
   A CSV file in a static site normally needs a fetch() at runtime,
@@ -350,7 +460,7 @@
 
   The parser is RFC 4180-compliant for the common cases:
 
-    - Comma delimiter (fixed).
+    - Comma delimiter (default; per-block override via data-delim).
     - Quoted fields ("like this").
     - Escaped quotes inside quoted fields ("say ""hi""").
     - Embedded commas inside quoted fields ("a,b").
@@ -360,10 +470,10 @@
     - Header row auto-detected from the first row.
 
   The parser is deliberately small (~30 lines of JavaScript).  It does
-  not handle: delimiters other than comma, BOM stripping, type coercion
-  (every field is a string), or streaming large files.  If you need
-  any of those, pre-process your CSV before packing, or extract it
-  with -x csv and use a full library.
+  not handle: BOM stripping, type coercion (every field is a string),
+  or streaming large files.  If you need any of those, pre-process
+  your CSV before packing, or extract it with -x csv and use a full
+  library.
 
   ── LISTING AND EXTRACTING CSV ───────────────────────────────────────
 
@@ -639,6 +749,26 @@
       Tiny SVGs and GIFs stay as data: URIs where they are cheap and
       avoid an extra decode step at load time.
 
+  ── EXAMPLE 13: Poll arcager.state instead of awaiting ──────────────
+
+      // If you cannot use async/await, poll the synchronous state:
+
+      function renderWhenReady() {
+        if (arcager.state === 'error') {
+          console.error('arcager failed to load:', arcager.error);
+          return;
+        }
+        if (arcager.state !== 'ready') {
+          setTimeout(renderWhenReady, 50);
+          return;
+        }
+        const grid = document.getElementById('grid');
+        for (const el of arcager.csv['elements'].data) {
+          grid.innerHTML += '<div>' + el.symbol + '</div>';
+        }
+      }
+      renderWhenReady();
+
 
 ================================================================================
   10. COMPRESSION RESULTS
@@ -715,10 +845,10 @@
       cause repeated reads.
 
   CSV DATA
-    - Comma delimiter only.  TSV files are accepted by the merge
-      scanner but currently parsed with the comma delimiter, producing
-      a single-column result; convert to CSV or set the delimiter
-      manually before packing.
+    - Comma delimiter by default.  TSV files are accepted by the merge
+      scanner but parsed with the comma delimiter unless the emitting
+      block carries data-delim="\t"; convert to CSV or set the
+      delimiter manually before packing.
     - The header row is always the first row.  There is no way to skip
       metadata rows or specify a header line number.
     - All fields are strings.  Numbers, booleans, and dates are not
@@ -744,6 +874,9 @@
       without this sentinel are refused by -u with "not an arcager
       file".
     - This version is not compatible with earlier 2.x bundles.
+    - 3.2.3 is on-disk compatible with 3.2.2, 3.2.1, and 3.2.0.
+      Files packed by 3.2.0 unpack correctly but expose an empty
+      arcager.csv at runtime; repack them with 3.2.3 to fix that.
 
 
 ================================================================================
@@ -794,18 +927,27 @@
       referenced by <link rel="csv">.
 
   CSV data is empty in the browser
-      arcager.csv['key'] is undefined.  Check that:
+      arcager.csv['key'] is undefined or {}.  Check that:
         - The <link rel="csv"> tag was inside <head> or <body> of the
           entry index.html (not a page reached by <a href>).
         - The data-key matches the file's basename (e.g. elements.csv
           → 'elements').
         - The merge report did not list the CSV under "missing".
-        - You awaited arcager.ready before reading arcager.csv.
+        - You awaited arcager.ready, or checked arcager.state, before
+          reading arcager.csv.  As of 3.2.1 arcager.ready is a real
+          pending Promise; as of 3.2.3 arcager.state tells you
+          synchronously whether the pack is still loading.
+        - If your code lands in the catch branch, or sees
+          arcager.state === 'error', the pack itself failed to load.
+          Read arcager.error or the loader panel for the reason.
+        - If you are running a file packed by 3.2.0, arcager.csv will
+          always be {}; repack it with the current tool.
 
   CSV parses as a single column
       The source file is likely tab-separated.  arcager parses CSV
-      with a comma delimiter only; convert the file to comma-
-      separated or process it manually.
+      with a comma delimiter by default; convert the file to comma-
+      separated, or emit a data-delim="\t" attribute on the
+      <script type="text/csv"> block.
 
   "output would overwrite input"
       -o points at the input file.  Choose a different output path.
@@ -832,6 +974,16 @@
   This version writes the sentinel <!--arcager:3-->.  It is not
   compatible with earlier 1.x or 2.x bundles; repack older files with
   the current tool if you need to change their contents.
+
+  3.2.3 is on-disk compatible with 3.2.2, 3.2.1, and 3.2.0.  The
+  only behavioral additions are arcager.state and arcager.error; the
+  ready Promise and arcager.loaded behave exactly as in 3.2.2.
+  window.arcager and window.arcager.ready continue to be defined
+  before any capability check, so applications can always
+
+      try { await arcager.ready; } catch (e) { ... }
+
+  and never encounter `ReferenceError: arcager is not defined`.
 
   BROWSER SUPPORT MATRIX
 
