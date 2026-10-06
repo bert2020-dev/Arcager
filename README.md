@@ -1,4 +1,4 @@
-# Arcager 4.0
+ # Arcager 4.0
 
 **One HTML file. A real packaging layer behind it.**
 
@@ -272,7 +272,7 @@ If a resource was deliberately converted, extraction uses the **stored represent
 
 ## Installation
 
-Installation is intentionally boring because most users should not need to think about it before deciding whether Arcager is useful.
+Installation is quite simple and basically requires python and a few libs. It's recommended to install everything so all the features get enabled
 
 ### Core
 
