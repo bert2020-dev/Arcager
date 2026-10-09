@@ -52,7 +52,7 @@ except ImportError:
 _AESGCM = None
 _CRYPTOGRAPHY_ERROR = None
 
-VERSION = "4.0.0"
+VERSION = "4.0.1"
 SIGNATURE = "<!--arcager:4-->"
 SIG_RE = re.compile(r"^<!--arcager:(\d+)-->")
 V4_MAGIC = b"ARCAGER4"
