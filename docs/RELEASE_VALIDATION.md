@@ -1,6 +1,6 @@
-# Arcager 4.0.0 release validation
+# Arcager 4.0.1 release validation
 
-This document records the final v6 validation pass for the candidate Arcager 4.0.0 Solid Update repository. It is intentionally a concise release record rather than a historical audit log.
+This document records the final v6 validation pass for the candidate Arcager 4.0.1 Solid Update repository. It is intentionally a concise release record rather than a historical audit log.
 
 ## Local environment
 
