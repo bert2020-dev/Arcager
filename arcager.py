@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Arcager 4.0.0 — Solid Update.
+"""Arcager 4.0.1 — Solid Update.
 
 A cross-platform, dependency-free (for preservation mode) single-file HTML
 packer with content-aware resources, exact deduplication, MIME-segmented
@@ -841,11 +841,11 @@ class V4ContainerBuilder:
                 prio_by_phys[n.physical_id] = min(prio_by_phys[n.physical_id], n.priority)
             key_by_phys.setdefault(n.physical_id, n.key)
         for p in self.physicals:
-            # MIME is the primary affinity key. Text subtypes remain separate,
-            # which keeps stream behavior easy to reason about.
             groups[p.mime].append(p)
         for arr in groups.values():
-            arr.sort(key=lambda p: (prio_by_phys[p.id], key_by_phys.get(p.id, ""), p.id))
+            # Must be monotonic by physical id so offset deltas in the
+            # physical table (written in id order) stay non-negative.
+            arr.sort(key=lambda p: p.id)
         return groups
 
     @staticmethod
