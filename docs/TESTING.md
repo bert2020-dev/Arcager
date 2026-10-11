@@ -1,4 +1,4 @@
-# Arcager 4.0 testing
+# Arcager 4.2 testing
 
 ## Local regression suite
 
@@ -8,7 +8,7 @@ The repository includes `tests/test_solid.py` and runs with the standard pytest 
 python -m pytest -q
 ```
 
-The current implementation validation covers 25 standard tests locally, including:
+The suite covers the original contract tests plus `tests/test_cli_experience.py` (list/extract/unpack behavior, messages, version sync, CSV parser). It includes:
 
 - CLI help contract;
 - preservation-mode merge;
@@ -27,6 +27,12 @@ The current implementation validation covers 25 standard tests locally, includin
 - explicit metadata stripping with rendered-content validation;
 - Unicode paths and recursive batch input;
 - low-level header/metadata integrity failures;
+- every resource listed once (no duplicate CSV entries), byte-exact CSV/CSS/JS/HTML extraction, and pack→extract→re-pack equivalence;
+- `-x all`/`docs` restoring `index.html` with working relative references;
+- unpack producing readable `<style>`/`<script>` text instead of base64;
+- guiding error messages (unknown option/type, missing values, `lossy` placement);
+- documentation in sync with `VERSION` (`scripts/sync_docs.py --check`);
+- the runtime CSV parser (quotes, multi-line fields, tabs) executed under Node when available;
 - rejection of non-beneficial Solid compression candidates; rejection of compression candidates whose payload win is erased by final v4 stream metadata cost.
 
 The suite is deliberately CLI-oriented: it exercises the same entry points that users invoke rather than only testing helper functions.
@@ -168,3 +174,24 @@ pytest -q -m benchmark tests/test_benchmark_corpus.py
 ```
 
 The standard regression suite intentionally excludes these slower fixture tests by default.
+
+## Running the tests
+
+```bash
+python -m pip install -r requirements-dev.txt     # once: pytest (and the core requirements)
+python scripts/run_tests.py                       # normal tests, ends with PASSED or FAILED
+python scripts/run_tests.py --all                 # plus the slower benchmark-corpus tests
+python scripts/run_tests.py -k extract            # a subset by name
+python tests/test_cli_experience.py               # one file, same result line
+```
+
+A test file run without pytest or `run_tests.py` prints nothing because it only defines tests; that is not a pass. The scripts above always print a result, and exit non-zero on failure (usable in CI).
+
+Two benchmark-corpus checks (`test_benchmark_manifest_is_complete` and `test_fixture_digests_are_reproducible[16-many-tiny-files]`) fail when the `16-many-tiny-files` fixture is incomplete. The manifest expects 3,500 small files; a repository that holds only 100 of them (plus a stray file named `asd`) is the typical result of uploading the folder through GitHub's web interface, which accepts at most 100 files per upload. The packager is not involved. Regenerate the fixture with the project's own generator, after which all tests pass:
+
+```bash
+python benchmarks/examples.py --cases 16-many-tiny-files --force
+python scripts/run_tests.py --all
+```
+
+To keep it complete in the repository, add the folder with `git add` from the command line rather than the web upload.

@@ -93,3 +93,10 @@ def test_png_case_demonstrates_solid_rejection_without_data_loss(tmp_path):
     assert all(s["stored_bytes"] == s["raw_bytes"] for s in image_streams)
     # Most importantly, the test fails if a non-beneficial compressed stream is ever kept.
     assert all(not (s["decision"] == "compressed" and s["stored_bytes"] >= s["raw_bytes"]) for s in accounting["solid_decisions"])
+
+
+if __name__ == "__main__":
+    # Running this file directly used to print nothing at all (it only defines tests).
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+    from run_tests import main as _run_tests
+    raise SystemExit(_run_tests([str(Path(__file__).resolve())]))

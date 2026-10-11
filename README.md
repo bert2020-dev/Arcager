@@ -1,4 +1,4 @@
- # Arcager 4.0
+ # Arcager 4.2
 
 **One HTML file. A real packaging layer behind it.**
 
@@ -10,7 +10,7 @@ Arcager 4.x is the **Solid Update**: more capable than 3.x, but deliberately sim
 
 [![License](https://img.shields.io/badge/license-see%20LICENSE.txt-blue.svg)](LICENSE.txt)
 [![Python](https://img.shields.io/badge/python-3.8%2B-blue.svg)](https://www.python.org/)
-[![Core dependencies](https://img.shields.io/badge/core%20dependencies-none-brightgreen.svg)](#installation)
+[![Core dependencies](https://img.shields.io/badge/core%20dependency-cryptography-brightgreen.svg)](#installation)
 [![Platforms](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey.svg)](#cross-platform)
 
 ## Why use Arcager?
@@ -28,7 +28,7 @@ That is useful for:
 
 ### What 4.x brings together
 
-| Goal | Arcager 4.0 |
+| Goal | Arcager 4.2 |
 |---|---|
 | **One-file distribution** | Static sites become self-unpacking HTML. |
 | **Preservation** | Original representations are kept by default. |
@@ -47,7 +47,7 @@ The core philosophy is simple:
 
 ## Quick start
 
-You can start with the normal preservation path without installing third-party Python packages:
+Once the one required package is installed (`python -m pip install -r requirements.txt`, see [Installation](#installation)), the normal preservation path needs nothing else:
 
 ```bash
 # Pack one HTML document; GZIP is the default.
@@ -74,17 +74,24 @@ python arcager.py -b ./assets page.html
 # Add an opaque encrypted hidden bundle; Arcager prompts for its password.
 python arcager.py -b secret.zip hidden cover.html
 
-# Restore the root HTML from a package.
-python arcager.py -u packed_page.html
+# See what is inside a package (every resource listed once).
+python arcager.py -l packed_page.html
 
-# Inspect or extract resources.
-python arcager.py -l all packed_page.html
+# Get files back: everything, or only some types, or only some names.
 python arcager.py -x all -O ./extracted packed_page.html
+python arcager.py -x docs,csv packed_page.html
+python arcager.py -x all --only 'data/*.csv' packed_page.html
+
+# Rebuild ONE standalone, readable HTML file (CSS/JS come back as normal text).
+python arcager.py -u packed_page.html
 ```
+
+Packing reports the result for every file as the **percentage of the original size** and the **factor**, for example
+`195.5 KB ↓ 94.0 KB  48.1% · 2.08×`: the package is 48.1% of the source size, so the source is 2.08 times larger. Below 100% (and a factor above 1×) is smaller; above 100% means larger, which already-compressed content can cause.
 
 For automation, `--password` and `--bundle-password` are available. Avoid putting passwords on the command line when shell history or process arguments are a concern.
 
-Run `python arcager.py --help` for the complete CLI contract.
+Run `python arcager.py --help` for the complete reference (it explains every option and resource type), or read [`docs/CLI.md`](docs/CLI.md).
 
 ## See the numbers
 
@@ -96,14 +103,14 @@ The benchmark measures final package size, compression ratio, raw-resource and s
 
 These are measurements from the v6 validation environment (Linux, Python 3.13.5). They are examples, not universal performance guarantees; run the shipped corpus on your own machine for local numbers.
 
-| Workload | Source | Final HTML | Ratio | Change |
+| Workload | Source | Final HTML | Ratio | Size vs source |
 |---|---:|---:|---:|---:|
-| PNG gallery | 8.09 MiB | 10.13 MiB | 0.80× | +25.2% |
-| Tetris-style game | 1.38 MiB | 0.24 MiB | **5.70×** | **−82.5%** |
-| 7z + 12 CSV datasets | 0.58 MiB | 0.66 MiB | 0.88× | +13.9% |
-| Scientific JSON/XML/CSV | 4.15 MiB | 0.57 MiB | **7.31×** | **−86.3%** |
-| Duplicate-rich site | 5.38 MiB | 0.28 MiB | **19.04×** | **−94.7%** |
-| Font-heavy site | 1.77 MiB | 1.15 MiB | **1.54×** | **−35.0%** |
+| PNG gallery | 8.09 MiB | 10.13 MiB | 0.80× | 125.2% |
+| Tetris-style game | 1.38 MiB | 0.24 MiB | **5.70×** | **17.5%** |
+| 7z + 12 CSV datasets | 0.58 MiB | 0.66 MiB | 0.88× | 113.9% |
+| Scientific JSON/XML/CSV | 4.15 MiB | 0.57 MiB | **7.31×** | **13.7%** |
+| Duplicate-rich site | 5.38 MiB | 0.28 MiB | **19.04×** | **5.3%** |
+| Font-heavy site | 1.77 MiB | 1.15 MiB | **1.54×** | **65.0%** |
 
 The PNG result is useful rather than embarrassing: already-compressed binary media can make a single HTML file larger because of serialization overhead. Arcager therefore **does not pretend that every input should shrink**. Solid compression is rejected when it does not pay for itself, and preservation mode does not rewrite the PNG merely to improve a benchmark number.
 
@@ -151,8 +158,8 @@ The default path does not reinterpret media. `lossy` merely grants permission to
 The generic v4 container can hold:
 
 - HTML/XHTML
-- CSS and JavaScript
-- JSON, XML and TXT
+- CSS and JavaScript (classic `.js` and ES modules `.mjs`, whose `import`s are followed)
+- XML (as a document), JSON and TXT
 - CSV/TSV
 - SVG
 - PNG, JPEG, WebP, GIF, BMP, ICO and AVIF
@@ -192,56 +199,44 @@ Current safety limits are:
 - hidden bundles: **512 MiB total uncompressed**;
 - merge media: **64 MiB per resource**.
 
+In merge mode, files that nothing links to are still packed (scripts may build names at run time), but Arcager lists them with their sizes so you can decide; `--skip-unused` leaves them out. Other HTML pages in the folder are not packed, and Arcager says so.
+
 An already-packed Arcager document is not recursively packed as an ordinary visible bundle in 4.0; it is skipped with a warning. Explicit repacking/reoptimization is future work.
 
 ### CSV / TSV
 
-CSV/TSV can participate in the generic container and the existing merge workflow. A merged CSV reference can become an inline data block and is exposed through `window.arcager.csv` after the runtime is ready.
+A table linked with `<link rel="csv" href="data/prices.csv">` in merge mode is stored **once**, inline in the page, and exposed through `window.arcager.csv.prices` once the runtime is ready. Tables written directly as `<script type="text/csv" data-key="prices">` work the same way. `arcager -l` shows each table once with its original path, and `arcager -x csv` writes the original file back byte for byte.
 
 ## Runtime API
 
-The browser API is intentionally small.
+A packed page exposes five members on `window.arcager`. The complete reference, with examples for images and CSV, is in [`docs/API.md`](docs/API.md).
 
-### Readiness and errors
+| Member | What it gives you |
+|---|---|
+| `ready` | Promise; resolves when the package is unpacked, rejects on failure |
+| `error` | `null`, or the `Error` that made `ready` reject |
+| `images` | `{ name: blob-URL }` for every packaged resource (several names per file) |
+| `getImage(name)` | a new `Image`, or `null`; tolerant of `./`, extension and case |
+| `csv` | `{ key: { rows, data } }`; `rows[0]` is the header, `data` is header-keyed objects |
 
 ```javascript
 try {
     await window.arcager.ready;
-    console.log("Arcager package is ready");
 } catch (error) {
     console.error(window.arcager.error || error);
+    return;
 }
-```
 
-- `window.arcager.ready` — Promise that resolves after the package has been unpacked and the runtime has prepared its resources.
-- `window.arcager.error` — `null` on success; an `Error` object when initialization fails.
+// Images: pick one at run time.
+const logo = window.arcager.getImage("logo.png");
+if (logo) document.body.appendChild(logo);
+
+// CSV: every value is a string.
+const { data } = window.arcager.csv.elements;
+const heavy = data.filter(row => Number(row.mass) > 200);
+```
 
 The old v3 `window.arcager.state` and `window.arcager.loaded` signals are removed in v4.
-
-### Images
-
-```javascript
-await window.arcager.ready;
-
-const image = window.arcager.getImage("logo.png");
-if (image) document.body.appendChild(image);
-
-const url = window.arcager.images["logo.png"];
-```
-
-`getImage()` returns an `Image` element with the packaged resource as its source, or `null` when the requested alias is unavailable. `arcager.images` contains convenient aliases for packaged image resources and their common path/stem forms.
-
-### CSV
-
-```javascript
-await window.arcager.ready;
-
-const table = window.arcager.csv.elements;
-console.log(table.rows);
-console.log(table.data);
-```
-
-CSV entries expose `rows` as arrays and `data` as header-keyed objects. The key comes from the merged CSV block's `data-key` when present, otherwise Arcager assigns one.
 
 ## Encryption and integrity
 
@@ -253,53 +248,66 @@ The container also carries structural/integrity checks for its header, metadata 
 
 Encryption is a protection mechanism for the packaged data; once authorized plaintext has been rendered in a browser, Arcager does not claim to make that plaintext impossible to inspect or copy.
 
-## Listing and extraction
-
-Useful resource categories include:
-
-```text
-all, images, videos, audio, fonts, docs, text, csv, vector, pack, media
-```
-
-Examples:
+## Listing, extraction and unpacking
 
 ```bash
-python arcager.py -l images,fonts packed_site.html
-python arcager.py -x docs,csv -O ./extract packed_site.html
+python arcager.py -l [TYPES] packed_site.html          # list: every resource once
+python arcager.py -x [TYPES] [--only PATTERN] packed_site.html   # extract to ./extracted
+python arcager.py -u packed_site.html                  # one standalone, readable HTML file
 ```
 
-If a resource was deliberately converted, extraction uses the **stored representation**. A resource stored as WebP is therefore extracted as WebP rather than pretending the original PNG/JPEG bytes still exist.
+`TYPES` is a comma-separated list; the default is `all`:
+
+<!-- BEGIN GENERATED: types -->
+| Type | What it is | Matches |
+|---|---|---|
+| `all` | Every resource in the package | everything readable without an extra password |
+| `docs` | Pages, styles, scripts and documents | HTML/XHTML, CSS, JavaScript (.js, .mjs), XML, Markdown, plain text, PDF, EPS |
+| `images` | Raster images | PNG, JPEG, WebP, GIF, BMP, ICO, AVIF |
+| `vector` | Vector graphics | SVG |
+| `fonts` | Web fonts | WOFF, WOFF2, TTF, OTF, EOT |
+| `audio` | Audio | MP3, OGG/Opus, WAV, M4A, AAC, FLAC |
+| `videos` | Video | MP4, WebM, OGV, MOV |
+| `media` | Images + vector + audio + video | images, vector, audio and videos together |
+| `csv` | Tables | CSV and TSV, including tables embedded in the page as <script type="text/csv"> |
+| `data` | Structured data | JSON, XML, CSV, TSV |
+| `text` | Anything stored as text | docs + data + SVG (everything you can open in a text editor) |
+| `other` | Everything else | archives (ZIP, 7z, GZIP), unknown binaries |
+| `pack` | Hidden bundle contents | encrypted payload added with -b PATH hidden; needs its own password |
+<!-- END GENERATED: types -->
+
+- **Extraction returns working files.** `index.html`, stylesheets and scripts come back with normal relative references, so the folder can be re-packed with `-M`. Existing files are never overwritten without `-f`.
+- **Pick by name with `--only`:** `-x all --only 'data/*.csv'`, or `--only elements` for the table `window.arcager.csv.elements`.
+- **Stored representation.** If a resource was deliberately converted, extraction uses what is stored: an image stored as WebP is extracted as WebP rather than pretending the original PNG/JPEG bytes still exist.
+- **Unpacking** turns `<link rel="stylesheet">` and `<script src>` back into inline `<style>` and `<script>` text. Only binary files (images, fonts, audio, …) stay embedded as base64.
+
+Details, examples and troubleshooting: [`docs/CLI.md`](docs/CLI.md).
 
 ## Installation
 
-Installation is quite simple and basically requires python and a few libs. It's recommended to install everything so all the features get enabled
-
-### Core
-
-The preservation path has **no mandatory third-party Python dependency**.
-
-Python **3.8+** is the intended compatibility baseline:
+You need Python **3.8+** and one package, `cryptography`, because encryption (`-E`, hidden bundles) is a core part of Arcager and not an add-on. Everything else is optional.
 
 ```bash
-python arcager.py --help
+python -m pip install -r requirements.txt            # required: cryptography
+python -m pip install -r requirements-optional.txt   # optional: Brotli, Pillow
+npm install -g terser                                # optional: JavaScript minification
+python arcager.py -V                                 # shows what Arcager found
 ```
 
-### Optional capabilities
+`python arcager.py -V` prints the Arcager version and, for each component, whether it is available and which version, including **Terser**:
 
-```bash
-python -m pip install -r requirements-optional.txt
-npm install -g terser     # optional JavaScript minification
+```text
+arcager 4.2.0
+  Python        3.12.3  (/usr/bin/python3)
+  cryptography  46.0.6  (required, encryption)
+  Terser        5.51.2  (/usr/local/bin/terser)
+  Brotli        1.2.0  (optional, for -c brotli)
+  Pillow        12.1.1  (optional, for lossy / --strip-metadata)
 ```
 
-Optional packages provide capabilities such as AES-GCM, Brotli, image conversion/metadata handling and Terser-based minification. If an optional component is unavailable, the preservation path remains usable and unsupported optional transformations are skipped.
+If `cryptography` is missing Arcager stops immediately and prints the exact install command for the Python it is running under. Missing optional components never block normal packing: Arcager tells you which feature needs which component and how to install it.
 
-Use the included diagnostic when an environment behaves unexpectedly:
-
-```bash
-python scripts/doctor.py
-```
-
-It reports the exact interpreter and optional modules Arcager can actually import. This is especially useful on Windows, where the Microsoft Store `python.exe` alias, another Python installation, and an activated virtual environment can be different interpreters. Arcager never silently installs packages.
+For a more detailed diagnostic (every module path, Node.js, Terser) run `python scripts/doctor.py`. It is especially useful on Windows, where the Microsoft Store `python.exe` alias, another Python installation, and an activated virtual environment can be different interpreters. Arcager never installs packages by itself.
 
 ## Cross-platform
 
@@ -320,19 +328,14 @@ docs/TESTING.md        validation strategy
 .github/workflows/     cross-platform CI
 ```
 
-Current v6 local validation:
-
-```text
-25 standard Solid tests passed
-27 benchmark-corpus tests passed
-```
-
-Run them with:
+Run the tests with one command (install the test tools once with `python -m pip install -r requirements-dev.txt`):
 
 ```bash
-python -m pytest -q tests/test_solid.py
-python -m pytest -q -m benchmark tests/test_benchmark_corpus.py
+python scripts/run_tests.py            # all normal tests, about 20 seconds
+python scripts/run_tests.py --all      # also the slower benchmark-corpus tests
 ```
+
+It ends with a plain **PASSED** or **FAILED** line. Running a test file directly, such as `python tests/test_solid.py`, now does the same. (Earlier, running a file directly printed nothing at all, because the files only *define* tests. Silence never means the tests passed.) `python -m pytest -q` works as well.
 
 The benchmark report is evidence, not marketing copy. It separates raw resource bytes, stream payload, Z85 overhead, HTML shell overhead and final package size so an already-compressed resource is not misrepresented as a failed compression operation.
 
@@ -365,6 +368,10 @@ v4 does not attempt to unpack v3 containers. An existing Arcager package supplie
 
 ## Documentation
 
+- [`docs/CLI.md`](docs/CLI.md) — every command and option, resource types, troubleshooting.
+- [`docs/API.md`](docs/API.md) — the browser API (`window.arcager`): images and CSV, with examples.
+- [`docs/RELEASING.md`](docs/RELEASING.md) — how the version number is managed (one place).
+- [`CHANGELOG.md`](CHANGELOG.md) — what changed in each version.
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — how the v4 container works.
 - [`docs/TESTING.md`](docs/TESTING.md) — regression, corruption, browser and benchmark strategy.
 - [`benchmarks/EXAMPLES.md`](benchmarks/EXAMPLES.md) — all 24 benchmark scenarios.

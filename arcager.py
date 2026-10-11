@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Arcager 4.0.1 — Solid Update.
+"""Arcager — Solid Update.
+
+The version number lives in exactly one place: ``VERSION`` below. Documentation
+is kept in sync by ``python scripts/sync_docs.py`` (see docs/RELEASING.md).
 
 A cross-platform, dependency-free (for preservation mode) single-file HTML
 packer with content-aware resources, exact deduplication, MIME-segmented
@@ -13,6 +16,8 @@ import argparse
 import base64
 import binascii
 import dataclasses
+import difflib
+import fnmatch
 import getpass
 import gzip
 import hashlib
@@ -20,6 +25,7 @@ import io
 import json
 import mimetypes
 import os
+import posixpath
 import re
 import secrets
 import shutil
@@ -52,7 +58,8 @@ except ImportError:
 _AESGCM = None
 _CRYPTOGRAPHY_ERROR = None
 
-VERSION = "4.0.1"
+VERSION = "4.2.0"   # <- the ONE place to change the version; then run scripts/sync_docs.py
+__version__ = VERSION
 SIGNATURE = "<!--arcager:4-->"
 SIG_RE = re.compile(r"^<!--arcager:(\d+)-->")
 V4_MAGIC = b"ARCAGER4"
@@ -101,7 +108,7 @@ _BUNDLE_EXTS = {
     ".html":"text/html", ".htm":"text/html", ".xhtml":"application/xhtml+xml", ".pdf":"application/pdf",
     ".eps":"application/postscript", ".txt":"text/plain", ".md":"text/markdown", ".markdown":"text/markdown",
     ".csv":"text/csv", ".tsv":"text/tab-separated-values", ".json":"application/json", ".xml":"application/xml",
-    ".css":"text/css", ".js":"text/javascript",
+    ".css":"text/css", ".js":"text/javascript", ".mjs":"text/javascript",
 }
 _EXT_BY_MIME = {
     "image/png":".png", "image/jpeg":".jpg", "image/webp":".webp", "image/gif":".gif",
@@ -124,11 +131,31 @@ _CSV_KEY_RE = re.compile(r"\bdata-key\s*=\s*(['\"])([^'\"]+)\1", re.I)
 _EXTERNAL_PREFIXES = ("http://", "https://", "//", "data:", "mailto:", "tel:", "javascript:", "#", "blob:", "about:", "ftp://", "ws://", "wss://", "file:")
 _SAFE_KEY_RE = re.compile(r"^[\w\-./ @+]+$", re.UNICODE)
 _ARCHIVE_EXTS = (".zip", ".tar", ".tar.gz", ".tgz", ".tbz2", ".txz", ".tar.bz2", ".tar.xz")
-_LIST_TYPES = ("all", "images", "videos", "audio", "fonts", "docs", "media", "pack", "csv", "text", "data", "vector")
+# Resource types accepted by -l / -x. This table is the single source for the
+# --help text, error messages and the generated table in docs/CLI.md.
+TYPE_INFO = [
+    ("all",    "Every resource in the package",                  "everything readable without an extra password"),
+    ("docs",   "Pages, styles, scripts and documents",           "HTML/XHTML, CSS, JavaScript (.js, .mjs), XML, Markdown, plain text, PDF, EPS"),
+    ("images", "Raster images",                                  "PNG, JPEG, WebP, GIF, BMP, ICO, AVIF"),
+    ("vector", "Vector graphics",                                "SVG"),
+    ("fonts",  "Web fonts",                                      "WOFF, WOFF2, TTF, OTF, EOT"),
+    ("audio",  "Audio",                                          "MP3, OGG/Opus, WAV, M4A, AAC, FLAC"),
+    ("videos", "Video",                                          "MP4, WebM, OGV, MOV"),
+    ("media",  "Images + vector + audio + video",                "images, vector, audio and videos together"),
+    ("csv",    "Tables",                                         "CSV and TSV, including tables embedded in the page as <script type=\"text/csv\">"),
+    ("data",   "Structured data",                                "JSON, XML, CSV, TSV"),
+    ("text",   "Anything stored as text",                        "docs + data + SVG (everything you can open in a text editor)"),
+    ("other",  "Everything else",                                "archives (ZIP, 7z, GZIP), unknown binaries"),
+    ("pack",   "Hidden bundle contents",                         "encrypted payload added with -b PATH hidden; needs its own password"),
+]
+_LIST_TYPES = tuple(t[0] for t in TYPE_INFO)
+_TYPE_ORDER_HINT = ", ".join(_LIST_TYPES)
+
 
 def _valid_type_list(value: str) -> bool:
     parts = [x.strip().lower() for x in value.split(',') if x.strip()]
     return bool(parts) and all(x in _LIST_TYPES for x in parts)
+
 
 # Merge/reference regexes. They intentionally handle common static references,
 # while the docs explicitly do not promise a JavaScript bundler/module resolver.
@@ -206,6 +233,25 @@ def size_str(n: int) -> str:
             return f"{x:.1f} {u}" if u != "B" else f"{int(x)} B"
         x /= 1024
     return f"{int(n)} B"
+
+
+def ratio_str(before: int, after: int) -> str:
+    """Size comparison for humans: '46.8% · 2.14×'.
+
+    The percentage is the new size as a share of the original (100 * after / before),
+    so smaller output is below 100% and larger output is above it; no signs needed.
+    The factor is how many times larger the original is (above 1× = smaller output).
+    """
+    if before <= 0:
+        return "n/a"
+    pct = after * 100.0 / before
+    factor = (before / after) if after else float("inf")
+    fac = f"{factor:.2f}×" if factor != float("inf") else "∞×"
+    return f"{pct:.1f}% · {fac}"
+
+
+def percent_of(part: int, whole: int) -> str:
+    return f"{part * 100.0 / whole:.1f}%" if whole > 0 else "n/a"
 
 
 def read_bytes(path: str) -> bytes:
@@ -314,6 +360,55 @@ def cryptography_status():
         return {"available": False, "version": None, "interpreter": sys.executable, "error": str(exc)}
 
 
+def ensure_core_dependencies():
+    """Encryption is a core feature, so its library is a requirement, not an extra."""
+    status = cryptography_status()
+    if not status.get("available"):
+        exe = sys.executable
+        raise RuntimeError(
+            "Arcager needs the 'cryptography' package (it provides the encryption that is built into Arcager), "
+            f"but this Python cannot use it ({exe}).\n"
+            f"  Install it with:  {exe} -m pip install -r requirements.txt\n"
+            f"  (or just:         {exe} -m pip install cryptography)\n"
+            f"  Reason: {status.get('error', 'unknown')}")
+
+
+def terser_info():
+    """(path, version, problem) for the optional Terser minifier. Never raises."""
+    path = shutil.which("terser")
+    if not path:
+        return None, None, None
+    try:
+        r = subprocess.run([path, "--version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15)
+        text = (r.stdout or b"").decode("utf-8", errors="replace").strip()
+        m = re.search(r"(\d+\.\d+(?:\.\d+)?\S*)", text)
+        if r.returncode == 0 and m:
+            return path, m.group(1), None
+        return path, None, "it did not report a version (" + ((r.stderr or b"").decode("utf-8", errors="replace").strip()[:80] or f"exit code {r.returncode}") + ")"
+    except Exception as exc:
+        return path, None, f"it could not be run ({exc})"
+
+
+def version_text() -> str:
+    """Text printed by -V: Arcager's version and which components it can use."""
+    rows = [f"arcager {VERSION}", f"  Python        {sys.version.split()[0]}  ({sys.executable})"]
+    crypto = cryptography_status()
+    rows.append("  cryptography  " + (f"{crypto['version']}  (required, encryption)" if crypto.get("available")
+                else "NOT AVAILABLE  (required: python -m pip install -r requirements.txt)"))
+    path, ver, problem = terser_info()
+    if path is None:
+        rows.append("  Terser        not installed  (optional, for --minify: npm install -g terser)")
+    elif ver:
+        rows.append(f"  Terser        {ver}  ({path})")
+    else:
+        rows.append(f"  Terser        found at {path} but {problem}  (--minify will leave the loader unminified)")
+    rows.append("  Brotli        " + (f"{getattr(_brotli, '__version__', 'installed')}  (optional, for -c brotli)" if HAS_BROTLI
+                else "not installed  (optional, for -c brotli: python -m pip install brotli)"))
+    rows.append("  Pillow        " + (f"{getattr(sys.modules.get('PIL'), '__version__', 'installed')}  (optional, for lossy / --strip-metadata)" if HAS_PIL
+                else "not installed  (optional, for lossy / --strip-metadata: python -m pip install Pillow)"))
+    return "\n".join(rows)
+
+
 def prompt_password(label: str = "Password: ", confirm: bool = False) -> str:
     """Read a password consistently in TTY and piped/non-interactive modes."""
     if not sys.stdin.isatty():
@@ -404,7 +499,17 @@ def mime_id(mime: str) -> int:
     return MIME_TO_ID[m]
 
 
+_DOC_MIMES = frozenset((
+    "text/html", "application/xhtml+xml", "text/css", "text/javascript",
+    "application/javascript", "application/x-javascript", "text/plain",
+    "text/markdown", "application/pdf", "application/postscript",
+    "application/xml", "text/xml",
+))
+_DATA_MIMES = frozenset(("application/json",))   # XML is a document (docs) and is also matched by the "data" type
+
+
 def media_category(mime: str) -> str:
+    """Primary resource type of a MIME (the TYPE column of -l). See TYPE_INFO."""
     m = normalize_mime(mime)
     if m in ("text/csv", "text/tab-separated-values"):
         return "csv"
@@ -418,9 +523,11 @@ def media_category(mime: str) -> str:
         return "audio"
     if m.startswith("font/") or m == "application/vnd.ms-fontobject":
         return "fonts"
-    if m.startswith("text/") or m in ("application/json", "application/xml", "application/xhtml+xml"):
-        return "text" if m not in ("text/html", "text/css", "text/javascript", "text/csv", "text/tab-separated-values", "text/xml", "text/plain", "text/markdown") else "docs"
-    if m in ("application/pdf", "application/postscript"):
+    if m in _DATA_MIMES:
+        return "data"
+    if m in _DOC_MIMES:
+        return "docs"
+    if m.startswith("text/"):
         return "docs"
     return "other"
 
@@ -428,6 +535,20 @@ def media_category(mime: str) -> str:
 def is_textual(mime: str) -> bool:
     m = normalize_mime(mime)
     return (m.startswith("text/") or m in ("application/json", "application/xml", "application/xhtml+xml", "application/javascript", "application/x-javascript"))
+
+
+def matches_type(mime: str, typ: str) -> bool:
+    """True when a resource of this MIME belongs to the -l/-x type `typ`."""
+    if typ == "all":
+        return True
+    cat = media_category(mime)
+    if typ == "media":
+        return cat in ("images", "vector", "videos", "audio")
+    if typ == "data":
+        return cat in ("data", "csv") or normalize_mime(mime) in ("application/xml", "text/xml")
+    if typ == "text":
+        return is_textual(mime) or normalize_mime(mime) == "image/svg+xml"
+    return typ == cat
 
 
 def extless(path: str) -> str:
@@ -439,15 +560,45 @@ def safe_key(key: str, src: str):
         raise RuntimeError(f"unsafe bundle key {key!r} from {src}")
 
 # ---------- CSV ----------
+_CSV_SRC_RE = re.compile(r"\bdata-origin\s*=\s*(['\"])([^'\"]+)\1", re.I)
+_SCRIPT_END_ESC_RE = re.compile(r"<(\\+)/(script)", re.I)
+
+
+def escape_for_script(raw: str) -> str:
+    """Make text safe inside <script>…</script>, reversibly.
+
+    '</script' becomes '<\\/script'; text that already contains '<\\/script'
+    gains one more backslash, so unescape_from_script() restores the input exactly.
+    """
+    return re.sub(r"<(\\*)/(script)", lambda m: "<" + m.group(1) + "\\/" + m.group(2), raw, flags=re.I)
+
+
+def unescape_from_script(body: str) -> str:
+    return _SCRIPT_END_ESC_RE.sub(lambda m: "<" + m.group(1)[:-1] + "/" + m.group(2), body)
+
+
 def scan_csv_blocks(html: str):
+    """Find <script type="text/csv"> blocks.
+
+    Each result has: key (arcager.csv key), body (text between the tags, outer
+    CR/LF trimmed), src (the original file path recorded by --merge in
+    data-origin, or None), exact (True for blocks written by Arcager: ``body_raw``
+    then restores the original file text exactly), span (start, end offsets of
+    the whole tag) and body_raw.
+    """
     found = []
     for m in _SCRIPT_TAG_RE.finditer(html):
         attrs = m.group(1) or ""
         if not _CSV_TYPE_RE.search(attrs):
             continue
         km = _CSV_KEY_RE.search(attrs)
+        sm = _CSV_SRC_RE.search(attrs)
         key = km.group(2) if km else f"csv{len(found)}"
-        found.append({"key": key, "body": m.group(2).strip("\r\n")})
+        inner = m.group(2)
+        exact = sm is not None and inner.startswith("\n") and inner.endswith("\n")
+        raw = unescape_from_script(inner[1:-1]) if exact else inner.strip("\r\n")
+        found.append({"key": key, "body": inner.strip("\r\n"), "src": sm.group(2) if sm else None,
+                      "exact": exact, "body_raw": raw, "span": (m.start(), m.end())})
     return found
 
 
@@ -1043,7 +1194,8 @@ class V4ContainerBuilder:
                 "serialized_stored_bytes":stored_cost,"decision_reason":reason,
             })
 
-        self.stats["logical"]=len(self.nodes)
+        self.stats["logical"]=sum(1 for n in self.nodes if n.is_primary)   # runtime alias names are not separate resources
+        self.stats["aliases"]=sum(1 for n in self.nodes if not n.is_primary)
         self.stats["physical"]=len(self.physicals)
         self.stats["streams"]=len(streams)
         self.stats["raw_bytes"]=sum(s["raw_size"] for s in streams)
@@ -1322,8 +1474,13 @@ class MergeGraph:
         self.nodes=[]
         self.by_path={}
         self.external=set(); self.missing=set(); self.unmergeable=set(); self.dynamic=set()
+        self.unreferenced=[]     # (path, bytes) of files nothing links to
+        self.unlinked_pages=[]   # other .html files in the folder that are not packed
+        self.linked_pages=set()  # pages the packed page links to but merge mode cannot include
         self._queue=deque()
         self.bundle_nodes={}
+        self.csv_inlined={}      # absolute path -> arcager.csv key (tables stored once, as inline blocks)
+        self.csv_keys={}         # arcager.csv key -> absolute path
 
     def add_bundle_nodes(self, entries):
         for e in entries:
@@ -1364,7 +1521,9 @@ class MergeGraph:
         abs_path=resolve_local(os.path.dirname(src_node.path) if src_node.path else self.root_dir, url)
         if abs_path and os.path.isfile(abs_path):
             if _HTML_RE.search(abs_path):
-                self.unmergeable.add(url); return None
+                self.unmergeable.add(url)
+                if kind=="navigation": self.linked_pages.add(rel_key(self.root_dir,abs_path))
+                return None
             key=rel_key(self.root_dir,abs_path)
             mime=mime_for(abs_path)
             try:
@@ -1449,6 +1608,40 @@ class MergeGraph:
             text=_SRCSET_RE.sub(lambda m:self._rewrite_srcset(node,m),text)
             node.data=text.encode("utf-8")
 
+    def _csv_key(self, url: str, path: str) -> str:
+        """arcager.csv key for a linked table: the sanitized file name, made unique."""
+        base=re.sub(r'[^\w\-]','_',Path(url).stem) or 'csv'
+        key=base; n=2
+        while key in self.csv_keys:
+            key=f"{base}_{n}"; n+=1
+        if key!=base:
+            other=os.path.relpath(self.csv_keys[base],self.root_dir).replace(os.sep,'/')
+            warn(f"two tables are named '{base}' ({other} and {rel_key(self.root_dir,path)}); "
+                 f"the second is exposed as arcager.csv.{key}. Rename one of the files to choose the key yourself.")
+        return key
+
+    @staticmethod
+    def _read_csv_text(path: str) -> str:
+        data=read_bytes(path)
+        try:
+            return data.decode('utf-8')
+        except UnicodeDecodeError:
+            warn(f"{path} is not valid UTF-8; invalid bytes were replaced. Re-save it as UTF-8 for an exact round trip.")
+            return data.decode('utf-8',errors='replace')
+
+    def source_bytes(self) -> int:
+        """Bytes of the original files that went into this package (before any rewriting)."""
+        seen=set(); total=0
+        for n in self.nodes:
+            if n.path and n.path not in seen and os.path.isfile(n.path):
+                seen.add(n.path); total+=os.path.getsize(n.path)
+        for p in self.csv_inlined:
+            if p not in seen and os.path.isfile(p):
+                seen.add(p); total+=os.path.getsize(p)
+        for n in {id(x):x for x in self.bundle_nodes.values()}.values():
+            if not n.path: total+=len(n.data)    # -b bundle entries have no file of their own
+        return total
+
     def _rewrite_srcset(self,node,m):
         q=m.group(1); val=m.group(2); parts=[]
         for item in val.split(','):
@@ -1468,6 +1661,9 @@ class MergeGraph:
         dynamically later.
         """
         existing_paths = {os.path.abspath(n.path) for n in self.nodes if n.path}
+        # Tables linked with <link rel="csv"> already live in the page as inline blocks
+        # (window.arcager.csv); storing the file a second time would only add bytes.
+        existing_paths |= {os.path.abspath(p) for p in self.csv_inlined}
         for cur, dirs, files in os.walk(self.root_dir, followlinks=False):
             dirs.sort(); files.sort()
             # Do not descend into VCS metadata or an already-packed output cache.
@@ -1476,17 +1672,24 @@ class MergeGraph:
                 path = os.path.abspath(os.path.join(cur, name))
                 if path in existing_paths:
                     continue
-                if _HTML_RE.search(name):
-                    continue
                 try:
                     if read_signature(path) is not None:
-                        warn(f"{path}: already-packed Arcager resource skipped")
+                        continue        # an Arcager package sitting in the folder (e.g. an earlier output)
+                except OSError:
+                    pass
+                key = rel_key(self.root_dir, path)
+                if _HTML_RE.search(name):
+                    self.unlinked_pages.append(key)
+                    continue
+                try:
+                    size = os.path.getsize(path)
+                    self.unreferenced.append((key, size))
+                    if self.opts.skip_unused:
                         continue
                     data = read_bytes(path)
                 except OSError as exc:
-                    self.missing.add(f"{rel_key(self.root_dir, path)} ({exc})")
+                    self.missing.add(f"{key} ({exc})")
                     continue
-                key = rel_key(self.root_dir, path)
                 mime = mime_for(path)
                 self._get_or_create(key, path, mime, mime, data, 65535)
                 existing_paths.add(path)
@@ -1520,7 +1723,9 @@ class MergeGraph:
             n=self._queue.popleft()
             self.scan_node(n)
         if self.missing:
-            raise RuntimeError("missing local resources:\n  " + "\n  ".join(sorted(self.missing)))
+            raise RuntimeError("missing local resources — these files are referenced by your HTML/CSS/JS but do not exist:\n  " + "\n  ".join(sorted(self.missing)) +
+                               "\n  Check the spelling (paths are case-sensitive on Linux/macOS) and that they are inside the folder you are packing, "
+                               "relative to the file that references them.")
         return root
 
     def _transform_html(self,node: GraphNode, html: str):
@@ -1537,8 +1742,13 @@ class MergeGraph:
                 if is_external(url): self.external.add(url); return tag
                 p=resolve_local(os.path.dirname(node.path),url)
                 if not p or not os.path.isfile(p): self.missing.add(url); return tag
-                raw=read_text(p); key=re.sub(r'[^\w\-]','_',Path(url).stem); raw=raw.replace('</script>','<\\/script>')
-                return f'<script type="text/csv" data-key="{escape_attr(key)}">\n{raw}\n</script>'
+                if p in self.csv_inlined: return ''   # same table linked twice: keep one block
+                key=self._csv_key(url,p)
+                raw=self._read_csv_text(p)
+                rel=rel_key(self.root_dir,p)
+                if rel.startswith('..'): rel=os.path.basename(p)
+                self.csv_inlined[p]=key; self.csv_keys[key]=p
+                return f'<script type="text/csv" data-key="{escape_attr(key)}" data-origin="{escape_attr(rel)}">\n{escape_for_script(raw)}\n</script>'
             if is_external(url):
                 if url.lower().startswith(('http://','https://','//')): self.external.add(url)
                 return tag
@@ -1583,6 +1793,27 @@ class MergeGraph:
             return m.group(0) if n is None else f'url({m.group(1)}{token_for(n.id,split_ref(url)[1])}{m.group(1)})'
         return _CSS_URL_RE.sub(repl,text)
 
+# Dark loader theme (shown only while the package unpacks, then the page replaces itself).
+LOADER_CSS = (
+    "[hidden]{display:none!important}"
+    "html{color-scheme:dark;background:#0f1115}"
+    "body{margin:0;background:#0f1115;color:#e6e8ec;font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}"
+    "#__pnl{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;padding:16px;box-sizing:border-box;background:#0f1115;z-index:2147483647}"
+    "#__box{box-sizing:border-box;width:100%;max-width:420px;padding:26px 28px;border:1px solid #262b36;border-radius:14px;background:#171a21;box-shadow:0 18px 48px rgba(0,0,0,.55)}"
+    "#__brand{font-size:11px;letter-spacing:.22em;color:#6f7a90;margin-bottom:10px}"
+    "#__lbl{font-size:16px;line-height:1.4;color:#e6e8ec}"
+    "#__bar{margin-top:16px;height:6px;background:#262b36;border-radius:6px;overflow:hidden}"
+    "#__fill{width:2%;height:100%;border-radius:6px;background:linear-gradient(90deg,#6ea8ff,#8f7dff);transition:width .15s linear}"
+    "#__pwf{display:flex;gap:8px;margin-top:16px}"
+    "#__pw{flex:1;min-width:0;padding:10px 12px;font:inherit;color:#e6e8ec;background:#0f1115;border:1px solid #343b4a;border-radius:8px;outline:none}"
+    "#__pw:focus{border-color:#6ea8ff;box-shadow:0 0 0 3px rgba(110,168,255,.22)}"
+    "#__pwf button{padding:10px 16px;font:inherit;font-weight:600;color:#0b1020;background:#6ea8ff;border:0;border-radius:8px;cursor:pointer}"
+    "#__pwf button:hover{background:#8dbbff}"
+    "#__err{margin-top:12px;font-size:14px;line-height:1.45;color:#ff9a9a;white-space:pre-wrap;word-break:break-word}"
+    "#__err:empty{display:none}"
+    "@media (prefers-reduced-motion:reduce){#__fill{transition:none}}"
+)
+
 # ---------- container shell ----------
 JS_RUNTIME = r'''(function(){"use strict";
 var E=document.getElementById("__pk"),P=document.getElementById("__pnl"),L=document.getElementById("__lbl"),F=document.getElementById("__fill"),ER=document.getElementById("__err");
@@ -1597,7 +1828,8 @@ function b64d(s){var x=atob(s),o=new Uint8Array(x.length);for(var i=0;i<x.length
 function varint(a,p){var v=0,m=1,b;do{if(p>=a.length)throw Error("truncated Arcager metadata");b=a[p++];v+=(b&127)*m;if(v>Number.MAX_SAFE_INTEGER)throw Error("Arcager metadata integer is too large");m*=128;}while(b&128);return [v,p];}
 function u32(a,p){return (((a[p])|(a[p+1]<<8)|(a[p+2]<<16)|(a[p+3]<<24))>>>0);}
 function u64(a,p){var v=u32(a,p)+u32(a,p+4)*4294967296;if(v>Number.MAX_SAFE_INTEGER)throw Error('v4 payload is too large for this browser runtime');return v;}
-function fail(e){var x=e&&e.message?e.message:String(e);window.arcager.error=e instanceof Error?e:new Error(x);if(ER)ER.textContent=x;if(L)L.textContent="Failed to unpack";if(P)P.hidden=false;if(window.console)console.error(e);readyReject(window.arcager.error);}
+function fail(e){var x=e&&e.message?e.message:String(e);window.arcager.error=e instanceof Error?e:new Error(x);var pf=document.getElementById("__pwf");if(pf)pf.hidden=true;if(ER)ER.textContent=x;if(L)L.textContent="Failed to unpack";if(P)P.hidden=false;if(window.console)console.error(e);readyReject(window.arcager.error);}
+function askPassword(note){return new Promise(function(res,rej){var f=document.getElementById("__pwf"),i=document.getElementById("__pw"),bar=document.getElementById("__bar");if(!f||!i){var v=prompt("Enter Arcager password:");if(v===null)rej(Error("password entry cancelled"));else res(v);return;}if(L)L.textContent="This page is password protected";if(ER)ER.textContent=note||"";if(bar)bar.hidden=true;f.hidden=false;i.value="";i.focus();f.onsubmit=function(ev){ev.preventDefault();var v=i.value;f.hidden=true;if(ER)ER.textContent="";if(L)L.textContent="Checking password\u2026";res(v);};});}
 function progress(n){if(F)F.style.width=Math.max(0,Math.min(100,n))+'%';if(L)L.textContent='Unpacking… '+Math.floor(n)+'%';}
 var M=["application/octet-stream","text/html","application/xhtml+xml","text/css","text/javascript","application/javascript","application/json","application/xml","text/xml","text/plain","text/csv","text/tab-separated-values","image/png","image/jpeg","image/webp","image/gif","image/svg+xml","image/bmp","image/x-icon","image/avif","font/woff","font/woff2","font/ttf","font/otf","application/vnd.ms-fontobject","application/pdf","application/postscript","audio/mpeg","audio/ogg","audio/wav","audio/mp4","audio/aac","audio/flac","audio/opus","video/mp4","video/webm","video/ogg","video/quicktime","text/markdown","application/zip","application/gzip","application/x-7z-compressed"];
 function crc32(a){var c=~0;for(var i=0;i<a.length;i++){c^=a[i];for(var j=0;j<8;j++)c=(c>>>1)^(0xEDB88320&-(c&1));}return (~c)>>>0;}
@@ -1693,22 +1925,38 @@ function buildURLs(C,streams){var byLogical={},images={},physRawUrl={},physUrl={
   function finalReplace(text){return replacePlain(replaceTokens(text));}
   return {byLogical:byLogical,physUrl:physUrl,images:images,replaceTokens:finalReplace,urls:usedURLs};}
 
+function parseCSV(body){
+  /* RFC 4180-style: quoted fields may contain delimiters, doubled quotes and line breaks. One delimiter per table (tab if the first line has a tab, else comma). Blank lines are skipped. */
+  body=String(body).replace(/^\uFEFF/,'').replace(/\r\n?/g,'\n');
+  var first=body.split('\n',1)[0]||'',delim=first.indexOf('\t')>=0?'\t':',';
+  var rows=[],row=[],cur='',inq=false,seen=false;
+  for(var i=0;i<body.length;i++){
+    var ch=body.charAt(i);
+    if(inq){if(ch==='"'){if(body.charAt(i+1)==='"'){cur+='"';i++;}else inq=false;}else cur+=ch;}
+    else if(ch==='"'){inq=true;seen=true;}
+    else if(ch===delim){row.push(cur);cur='';seen=true;}
+    else if(ch==='\n'){if(seen||cur!==''){row.push(cur);rows.push(row);}row=[];cur='';seen=false;}
+    else{cur+=ch;seen=true;}
+  }
+  if(seen||cur!==''){row.push(cur);rows.push(row);}
+  return rows;
+}
 async function main(){
   if(typeof DecompressionStream==='undefined')throw Error('This browser does not provide DecompressionStream.');
   if(!E)throw Error('Arcager v4 container block is missing.');
   var enc=E.getAttribute('data-e')==='1',rawSize=Number(E.getAttribute('data-n')||0),blob=z85d(E.textContent||'',rawSize),key=null;
-  if(enc){if(!crypto||!crypto.subtle)throw Error('Encrypted Arcager packages require Web Crypto support.');var s=E.getAttribute('data-s'),iv=E.getAttribute('data-iv'),it=Number(E.getAttribute('data-i')),ck=E.getAttribute('data-ck');while(true){var pw=prompt('Enter Arcager password:');if(pw===null)throw Error('password entry cancelled');try{var k=await keyFromPassword(pw,s,it);var can=await decrypt(k,E.getAttribute('data-civ'),b64d(ck));if(new TextDecoder().decode(can)!=='arcager-ok')throw Error('bad password');key=k;break;}catch(e){if(window.console)console.warn('Arcager: incorrect password');alert('Incorrect password.');}}blob=await decrypt(key,iv,blob);}
+  if(enc){if(!crypto||!crypto.subtle)throw Error('Encrypted Arcager packages require Web Crypto support.');var s=E.getAttribute('data-s'),iv=E.getAttribute('data-iv'),it=Number(E.getAttribute('data-i')),ck=E.getAttribute('data-ck');var note='';while(true){var pw=await askPassword(note);try{var k=await keyFromPassword(pw,s,it);var can=await decrypt(k,E.getAttribute('data-civ'),b64d(ck));if(new TextDecoder().decode(can)!=='arcager-ok')throw Error('bad password');key=k;break;}catch(e){if(window.console)console.warn('Arcager: incorrect password');note='Incorrect password. Please try again.';}}var bar0=document.getElementById('__bar');if(bar0)bar0.hidden=false;if(L)L.textContent='Unpacking\u2026';blob=await decrypt(key,iv,blob);}
   var C=parseContainer(blob),cache=[],need={},nodes=C.logical;
   for(var i=0;i<C.logical.length;i++)need[C.logical[i].physical]=true;
   var streamIds={};for(var i=0;i<C.physical.length;i++)streamIds[C.physical[i].stream]=true;
   var streams={};var ids=Object.keys(streamIds);for(var j=0;j<ids.length;j++){progress(5+85*(j/ids.length));streams[ids[j]]=await streamBytes(C,Number(ids[j]),cache);}progress(95);
-  var U=buildURLs(C,streams);window.arcager.images=U.images;window.arcager.csv={};window.arcager.getImage=function(k){var u=U.images[k]||U.images[String(k).toLowerCase()];if(!u)return null;var img=new Image();img.src=u;return img;};
+  var U=buildURLs(C,streams);window.arcager.images=U.images;window.arcager.csv={};window.arcager.getImage=function(k){var s=String(k).replace(/\\/g,'/').replace(/^(?:\.\/|\/)+/,''),c=[s,s.replace(/\.[^.\/]+$/,'')],u=null;for(var i=0;i<c.length&&!u;i++)u=U.images[c[i]]||U.images[c[i].toLowerCase()]||null;if(!u)return null;var img=new Image();img.src=u;return img;};
   var rootIdx=-1;for(var i=0;i<nodes.length;i++){if(nodes[i].path==='index.html'){rootIdx=i;break;}}if(rootIdx<0)throw Error('v4 root HTML resource missing');
   var rp=nodes[rootIdx],pp=C.physical[rp.physical],rs=streams[pp.stream],next=C.nextOff[rp.physical];var html=new TextDecoder().decode(rs.subarray(pp.off,next));
   html=U.replaceTokens(html);
   for(var si=0;si<ids.length;si++)streams[ids[si]]=null; // Blob URLs own resource bytes now; release decompressed stream buffers.
   var csvBlocks=[];var re=/<script\b([^>]*?)>([\s\S]*?)<\/script\s*>/gi,m;while((m=re.exec(html))){if(/\btype\s*=\s*(['"])text\/csv\1/i.test(m[1]||'')){var km=(m[1]||'').match(/\bdata-key\s*=\s*(['"])([^'"]+)\1/i),keycsv=km?km[2]:'csv'+csvBlocks.length;csvBlocks.push({key:keycsv,body:m[2].trim()});}}
-  for(var c=0;c<csvBlocks.length;c++){var body=csvBlocks[c].body.replace(/\r\n/g,'\n');var lines=body.split('\n'),rows=[];for(var q=0;q<lines.length;q++){var line=lines[q];if(!line){continue;}var delim=line.indexOf('\t')>=0?'\t':',';var arr=[];var cur='',quote=false;for(var z=0;z<line.length;z++){var ch=line[z];if(ch==='"'){if(quote&&line[z+1]==='"'){cur+='"';z++;}else quote=!quote;}else if(ch===delim&&!quote){arr.push(cur);cur='';}else cur+=ch;}arr.push(cur);rows.push(arr);}var hdr=rows.length?rows[0]:[],data=rows.slice(1).map(function(r){var o={};for(var z=0;z<hdr.length;z++)o[hdr[z]]=r[z]===undefined?'':r[z];return o;});window.arcager.csv[csvBlocks[c].key]={rows:rows,data:data};}
+  for(var c=0;c<csvBlocks.length;c++){var rows=parseCSV(csvBlocks[c].body);var hdr=rows.length?rows[0]:[],data=rows.slice(1).map(function(r){var o={};for(var z=0;z<hdr.length;z++)o[hdr[z]]=r[z]===undefined?'':r[z];return o;});window.arcager.csv[csvBlocks[c].key]={rows:rows,data:data};}
   var cl='<scr'+'ipt>/* Arcager v4 cleanup */(function(){var p=document.getElementById("__pnl");if(p&&p.parentNode)p.parentNode.removeChild(p);var e=document.getElementById("__pk");if(e&&e.parentNode)e.parentNode.removeChild(e);})();<'+'/scr'+'ipt>';
   document.title=(html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)||[])[1]||document.title;
   html=html.replace(/<\/body>/i,cl+'</body>');document.open();document.write(html);document.close();window.arcager.images=U.images;window.arcager.csv=window.arcager.csv;readyResolve();
@@ -1728,7 +1976,7 @@ def shell_html(container: bytes, *, password_info=None, hidden_info=None, title=
         hattrs=" ".join(f'{k}="{escape_attr(str(v))}"' for k,v in hidden_info.items() if k!="data")
         hidden_block=f'<script type="text/plain" id="__hid" {hattrs}>{z85_script_safe(hidden_info["data"])}</script>'
     runtime = maybe_minify_js(JS_RUNTIME, minify, vlog_fn)
-    return f'''{SIGNATURE}\n<!doctype html><html><head><meta charset="utf-8"><title data-arcager-shell>{escape_text(title)}</title><style id="__arcager_style">body{{margin:0;font-family:system-ui,-apple-system,Segoe UI,sans-serif;background:#f7f7f7;color:#222}}#arcager-panel{{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(247,247,247,.96);z-index:2147483647}}#arcager-box{{min-width:280px;max-width:720px;padding:24px 28px;border:1px solid #bbb;border-radius:12px;background:#fff;box-shadow:0 14px 42px rgba(0,0,0,.12)}}#arcager-label{{font-size:16px}}#arcager-bar{{margin-top:14px;height:5px;background:#ddd;border-radius:4px;overflow:hidden}}#arcager-fill{{width:2%;height:100%;background:#555;transition:width .15s linear}}#arcager-error{{margin-top:12px;color:#a33;white-space:pre-wrap}}</style></head><body><div id="__pnl" style="position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(247,247,247,.96);z-index:2147483647"><div id="arcager-box"><div id="__lbl">Unpacking…</div><div id="arcager-bar"><div id="__fill"></div></div><div id="__err"></div></div></div><script type="application/octet-stream" id="__pk" {attrs_s}>{container_z85}</script>{hidden_block}<script>{runtime}</script></body></html>'''
+    return f'''{SIGNATURE}\n<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="dark"><title data-arcager-shell>{escape_text(title)}</title><style id="__arcager_style">{LOADER_CSS}</style></head><body><div id="__pnl"><div id="__box"><div id="__brand">ARCAGER</div><div id="__lbl">Unpacking…</div><div id="__bar"><div id="__fill"></div></div><form id="__pwf" hidden autocomplete="off"><input id="__pw" type="password" autocomplete="off" spellcheck="false" placeholder="Password" aria-label="Password"><button type="submit">Unlock</button></form><div id="__err" role="alert"></div></div></div><noscript><p style="position:fixed;inset:0;display:flex;align-items:center;justify-content:center;margin:0;background:#0f1115;color:#e6e8ec;font:16px system-ui,sans-serif;z-index:2147483647">This page is packed with Arcager and needs JavaScript to open.</p></noscript><script type="application/octet-stream" id="__pk" {attrs_s}>{container_z85}</script>{hidden_block}<script>{runtime}</script></body></html>'''
 
 # ---------- pack pipeline ----------
 def apply_base_href(html: str, base_href: str) -> str:
@@ -1818,17 +2066,40 @@ def output_path(opts, default_name, default_dir):
 
 def confirm_overwrite(path, force):
     if not os.path.exists(path) or force: return True
-    if not sys.stdin.isatty(): raise RuntimeError(f"output exists: {path} (use --force)")
+    if not sys.stdin.isatty(): raise RuntimeError(f"output file {path} already exists. Use -f to overwrite it, or choose another name with -o / -O.")
     ans=input(f"overwrite {path}? [y/N] ").strip().lower()
     return ans in ('y','yes')
 
 # ---------- merge orchestration ----------
+def report_unused(g, opts, folder):
+    """Tell the user about files that were found in the folder but are not used by the page."""
+    if g.unreferenced:
+        items = sorted(g.unreferenced, key=lambda x: -x[1])
+        total = sum(sz for _, sz in items)
+        limit = len(items) if opts.verbose else 5
+        lines = "\n".join(f"    {k}  ({size_str(sz)})" for k, sz in items[:limit])
+        more = f"\n    … and {len(items)-limit} more (use -v to list all)" if len(items) > limit else ""
+        n = len(items)
+        action = ("They were left out because of --skip-unused." if opts.skip_unused else
+                  "They are included anyway, in case your scripts build file names at run time. "
+                  "If they are not needed, delete them, or add --skip-unused to leave them out and make the package smaller.")
+        warn(f"{n} file{'s' if n != 1 else ''} ({size_str(total)}) in '{folder}' {'are' if n != 1 else 'is'} not linked from "
+             f"index.html, its CSS or its JavaScript:\n{lines}{more}\n  {action}")
+    pages = sorted(set(g.unlinked_pages) | g.linked_pages)
+    if pages:
+        names = ", ".join(f"{p} (linked from your page: that link will not work)" if p in g.linked_pages else p for p in pages[:6])
+        more = f" … and {len(pages)-6} more" if len(pages) > 6 else ""
+        warn(f"{len(pages)} other HTML page{'s' if len(pages) != 1 else ''} in '{folder}' {'are' if len(pages) != 1 else 'is'} not included: {names}{more}. "
+             f"Merge mode packs one page (index.html) with everything it uses. Pack another page on its own with: arcager PAGE.html")
+
+
 def merge_directory(dir_path,opts,out_name,visible_entries):
     root=os.path.abspath(dir_path); index=None
     for name in ('index.html','index.htm','default.html','default.htm'):
         p=os.path.join(root,name)
         if os.path.isfile(p): index=p; break
-    if not index: raise RuntimeError(f"no index.html found in {dir_path}")
+    if not index: raise RuntimeError(f"no index.html found in '{dir_path}'. Merge mode (-M) starts from the folder's index.html (or index.htm / default.html). "
+                                     f"Add one, or pack a single page with: arcager PAGE.html")
     g=MergeGraph(root,index,opts)
     # Bundle names are available as a secondary lookup path.
     for e in visible_entries:
@@ -1840,10 +2111,13 @@ def merge_directory(dir_path,opts,out_name,visible_entries):
     if opts.minify and opts.minify_lossy:
         minified, _, _ = minify_html_lossy(root_node.data.decode("utf-8",errors="replace"))
         root_node.data = minified.encode("utf-8")
+    report_unused(g,opts,dir_path)
     if g.external:
-        warn(f"external resource dependencies detected: {len(g.external)}; output may still require network access")
-        if opts.verbose:
-            for x in sorted(g.external): print(f"  external: {x}",file=sys.stderr)
+        ext=sorted(g.external)
+        shown=ext if opts.verbose else ext[:3]
+        more=f" … and {len(ext)-len(shown)} more (use -v to list all)" if len(shown)<len(ext) else ""
+        warn(f"{len(ext)} external resource(s) are loaded from the network, so the page is not fully standalone: "
+             f"{', '.join(shown)}{more}. To make it work offline, download them into the folder and reference them by relative path.")
     if g.unmergeable and opts.verbose:
         for x in sorted(g.unmergeable): print(f"  local HTML not flattened: {x}",file=sys.stderr)
     if g.dynamic and opts.verbose:
@@ -1916,7 +2190,7 @@ def decrypt_container(attrs,data,password=None):
         if aes_decrypt(key,attrs['data-civ'],base64.b64decode(attrs['data-ck']))!=PASSWORD_CHECK: raise ValueError
         return aes_decrypt(key,attrs['data-iv'],data),key
     except Exception:
-        raise RuntimeError("incorrect payload password or corrupted ciphertext")
+        raise RuntimeError("incorrect password, or the file is damaged. Check the password and try again (--password PW, or type it at the prompt).")
 
 
 def parse_pack_for_cli(path, password=None):
@@ -1944,226 +2218,696 @@ def logical_to_data_uri(data,mime):
     return "data:"+mime+";base64,"+base64.b64encode(data).decode('ascii')
 
 
-def unpack_packed(path,opts,out_name):
-    content,attrs,C,key=parse_pack_for_cli(path,opts.password)
-    root_i=next((i for i,n in enumerate(C['logical']) if n['path']=='index.html'),None)
-    if root_i is None: raise RuntimeError("v4 root HTML resource missing")
-    cache={}
-    # First build data URLs from stored representations. A second pass rewrites
-    # textual resources that themselves contain v4 resource tokens.
-    data_urls={}
-    raw_resources={}
-    for i,n in enumerate(C['logical']):
-        if n['flags'] & 8: continue
-        d=materialize_logical(C,i,cache); p=C['physical'][n['physical']]
-        raw_resources[i]=(d,p['mime'])
-        data_urls[i]=logical_to_data_uri(d,p['mime'])
-    for _ in range(2):
-        for i,(d,mime) in raw_resources.items():
-            if not is_textual(mime) and mime!='image/svg+xml':
+# ---------- package view: one parsed package shared by -l, -x and -u ----------
+TOKEN_RE = re.compile(r'arcager-res:(\d+)([?#][^\s"\'<>\)\]]*)?')
+_ATTR_RE = re.compile(r'''([^\s"'<>/=]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?''')
+_EXTS_BY_MIME = defaultdict(set)
+for _e, _m in _BUNDLE_EXTS.items():
+    _EXTS_BY_MIME[normalize_mime(_m)].add(_e)
+for _m, _e in _EXT_BY_MIME.items():
+    _EXTS_BY_MIME[normalize_mime(_m)].add(_e)
+# MIME types whose stored text may contain arcager-res:N tokens that point at other resources.
+_TOKEN_TEXT_MIMES = frozenset((
+    "text/html", "application/xhtml+xml", "text/css", "text/javascript", "application/javascript",
+    "image/svg+xml", "text/xml", "application/xml", "text/markdown", "text/plain",
+))
+# MIME types that can be written into a data: URL as readable text instead of base64.
+_TEXT_URL_MIMES = (_TOKEN_TEXT_MIMES - {"image/svg+xml"}) | frozenset(("application/json", "text/csv", "text/tab-separated-values"))
+
+
+def extraction_name(path: str, mime: str) -> str:
+    """File name used when a resource is written to disk (and shown by -l).
+
+    The stored name is kept whenever its extension already fits the stored MIME
+    (photo.jpeg stays photo.jpeg). A missing or mismatching extension - bundle
+    keys are stored without one, and a PNG converted to WebP is no longer a
+    PNG - is replaced by the canonical one for the stored MIME.
+    """
+    path = path.replace("\\", "/")
+    m = normalize_mime(mime)
+    if m == "application/octet-stream" or m not in _EXT_BY_MIME:
+        return path
+    base, ext = posixpath.splitext(path)
+    if ext.lower() in _EXTS_BY_MIME[m]:
+        return path
+    return base + _EXT_BY_MIME[m]
+
+
+def safe_extraction_filename(name: str) -> str:
+    """Make a logical path safe to create below the destination folder."""
+    parts = [x for x in name.replace("\\", "/").split("/") if x not in ("", ".", "..")]
+    if os.name == "nt":
+        parts = [re.sub(r'[<>:"|?*\x00-\x1f]', "_", x).rstrip(" .") or "_" for x in parts]
+    return "/".join(parts) if parts else "item.bin"
+
+
+def _unique_path(path: str, used: set) -> str:
+    if path.lower() not in used:
+        used.add(path.lower()); return path
+    base, ext = posixpath.splitext(path); n = 2
+    while f"{base}~{n}{ext}".lower() in used:
+        n += 1
+    cand = f"{base}~{n}{ext}"; used.add(cand.lower()); return cand
+
+
+def url_path(rel: str) -> str:
+    """Percent-encode a relative path for use in an href/src attribute."""
+    return urllib.parse.quote(rel, safe="/-_.~!$&()*+,;=:@")
+
+
+def relative_url(target: str, from_file: str) -> str:
+    start = posixpath.dirname(from_file) or "."
+    return url_path(posixpath.relpath(target, start))
+
+
+@dataclasses.dataclass
+class Resource:
+    """One thing a package can give back: a stored file, a table embedded in the page, or a hidden-bundle member."""
+    raw_path: str
+    out_path: str
+    mime: str
+    size: int
+    source_mime: str = ""
+    kind: str = "file"                 # file | embedded | hidden
+    index: Optional[int] = None        # logical index inside the container (files)
+    data: Optional[bytes] = None       # bytes of embedded / hidden resources
+    is_root: bool = False
+    converted: bool = False
+    aliases: list = dataclasses.field(default_factory=list)   # extra runtime names (arcager.images keys)
+    csv_keys: list = dataclasses.field(default_factory=list)  # arcager.csv keys that expose this resource
+
+    @property
+    def category(self) -> str:
+        return "pack" if self.kind == "hidden" else media_category(self.mime)
+
+
+class PackageView:
+    """A parsed v4 package with a lazily built resource catalog."""
+
+    def __init__(self, path: str, password: Optional[str] = None):
+        self.path = path
+        self.content, self.attrs, self.C, self.key = parse_pack_for_cli(path, password)
+        self.cache = {}
+        self.root_index = next((i for i, n in enumerate(self.C['logical']) if n['path'] == 'index.html'), None)
+        self._catalog = None
+        self._blocks = None
+        self._path_of = {}
+
+    # -- raw access
+    def raw(self, i: int) -> bytes:
+        return materialize_logical(self.C, i, self.cache)
+
+    def mime(self, i: int) -> str:
+        return self.C['physical'][self.C['logical'][i]['physical']]['mime']
+
+    def root_text(self) -> str:
+        if self.root_index is None:
+            raise RuntimeError("this package has no index.html resource; it may be damaged. Re-create it from the original sources.")
+        return self.raw(self.root_index).decode('utf-8', errors='replace')
+
+    # -- catalog
+    def catalog(self):
+        """Every distinct resource exactly once.
+
+        Runtime-only alias names are folded into their resource, and tables
+        that --merge stored as inline blocks are matched with the file that
+        holds the same data, so nothing is listed or extracted twice.
+        """
+        if self._catalog is not None:
+            return self._catalog
+        C = self.C; used = set(); res = []
+        alias_by_phys = defaultdict(list)
+        for i, n in enumerate(C['logical']):
+            if n['flags'] & 8:
+                alias_by_phys[n['physical']].append(n['path'])
+        by_phys = defaultdict(list)
+        for i, n in enumerate(C['logical']):
+            if n['flags'] & 8:
                 continue
-            text=d.decode('utf-8',errors='replace')
-            def rr(m):
-                j=int(m.group(1)); suffix=m.group(2) or ''
-                return data_urls.get(j,m.group(0))+suffix
-            rewritten=re.sub(r'arcager-res:(\d+)([?#][^\s"\'<>\)\]]*)?',rr,text)
-            data_urls[i]=logical_to_data_uri(rewritten.encode('utf-8'),mime)
-    html=materialize_logical(C,root_i,cache).decode('utf-8')
-    def repl(m):
-        idx=int(m.group(1)); suffix=m.group(2) or ''
-        return data_urls.get(idx,m.group(0))+suffix
-    html=re.sub(r'arcager-res:(\d+)([?#][^\s"\'<>\)\]]*)?',repl,html)
-    # Standalone visible bundles may remain as ordinary relative URLs in the
-    # stored root. Resolve those references during CLI unpack as well, so the
-    # unpacked result remains self-contained.
-    by_path={}
-    for i,n in enumerate(C['logical']):
-        if n['flags'] & 8: continue
-        by_path[n['path']]=data_urls[i]
-        by_path[n['path'].lstrip('./')]=data_urls[i]
-        if Path(n['path']).suffix:
-            by_path[str(Path(n['path']).with_suffix(''))]=data_urls[i]
-            by_path[Path(n['path']).name]=data_urls[i]
-    def resolve_plain(url):
-        base=split_ref(url)[0]
-        keys=[base,base.lstrip('./'),base.lstrip('/'),urllib.parse.unquote(base)]
-        if Path(base).suffix:
-            keys.append(str(Path(base).with_suffix('')))
-        for k in keys:
-            if k in by_path: return by_path[k]
-        return None
-    def attr_plain(m):
-        attr,q,url=m.group(1),m.group(2),m.group(3)
-        if is_external(url): return m.group(0)
-        u=resolve_plain(url)
-        return f'{attr}={q}{u}{split_ref(url)[1]}{q}' if u else m.group(0)
-    html=re.sub(r'\b(src|href|poster|xlink:href)\s*=\s*(["\'])([^"\']+)\2',attr_plain,html,flags=re.I)
-    def css_plain(m):
-        q,url=m.group(1),m.group(2)
-        u=resolve_plain(url)
-        return f'url({q}{u}{split_ref(url)[1]}{q})' if u and not is_external(url) else m.group(0)
-    html=_CSS_URL_RE.sub(css_plain,html)
-    write_text(out_name,html)
-    return {"inSize":len(content.encode()),"outSize":len(html.encode()),"restored":len(C['logical'])}
+            pid = n['physical']; p = C['physical'][pid]
+            src = p.get('source_mime', p['mime'])
+            r = Resource(raw_path=n['path'], out_path="", mime=p['mime'], size=C['next_off'][pid] - p['off'],
+                         source_mime=src, kind='file', index=i, is_root=(i == self.root_index),
+                         converted=bool(p['flags'] & 1) and src != p['mime'])
+            r.out_path = _unique_path(safe_extraction_filename(extraction_name(n['path'], p['mime'])), used)
+            res.append(r); by_phys[pid].append(r)
+        for pid, names in alias_by_phys.items():
+            owners = by_phys.get(pid)
+            if not owners:
+                continue
+            for name in names:
+                stem = posixpath.splitext(name)[0]
+                owner = next((o for o in owners if posixpath.splitext(o.raw_path)[0].endswith(stem)), owners[0])
+                owner.aliases.append(name)
+        self._path_of = {r.index: r.out_path for r in res}
+        for i, n in enumerate(C['logical']):       # alias logical ids resolve to their owner's path
+            if n['flags'] & 8 and by_phys.get(n['physical']):
+                self._path_of[i] = by_phys[n['physical']][0].out_path
+        self._attach_embedded_tables(res, used)
+        self._catalog = res
+        return res
 
-# ---------- list/extract ----------
-def _matches_type(mime, typ):
-    if typ in ('all','media'): return True
-    cat=media_category(mime)
-    return typ==cat or (typ=='docs' and cat=='docs') or (typ=='text' and (cat=='docs' or is_textual(mime)))
+    def table_blocks(self):
+        """Embedded tables found in the root page, each tagged with the Resource it corresponds to."""
+        if self._blocks is None:
+            self.catalog()
+        return self._blocks
+
+    def _attach_embedded_tables(self, res, used):
+        blocks = []
+        if self.root_index is not None:
+            try:
+                blocks = scan_csv_blocks(self.root_text())
+            except Exception:
+                blocks = []
+        files = [r for r in res if r.kind == 'file' and normalize_mime(r.mime) in ("text/csv", "text/tab-separated-values")]
+        by_path = {}
+        for r in files:
+            by_path[r.raw_path] = r; by_path[r.out_path] = r
+        content_of = {}
+        claimed = set()
+        for b in blocks:
+            target = None
+            if b['src']:
+                target = by_path.get(b['src'])
+            if target is None:
+                want = unescape_from_script(b['body']).strip("\r\n")
+                for r in files:
+                    if id(r) in claimed:
+                        continue
+                    if r.index not in content_of:
+                        content_of[r.index] = self.raw(r.index).decode('utf-8', errors='replace').strip("\r\n")
+                    if content_of[r.index] == want:
+                        target = r; break
+            if target is not None:
+                claimed.add(id(target))
+                target.csv_keys.append(b['key'])
+                b['target'] = target
+                continue
+            # Not backed by a stored file: the block itself is the only copy.
+            name = b['src'] or (b['key'] + ".csv")
+            data = (b['body_raw'] if b['exact'] else unescape_from_script(b['body_raw']) + ("\n" if b['body_raw'] and not b['body_raw'].endswith("\n") else "")).encode('utf-8')
+            r = Resource(raw_path=name, out_path=_unique_path(safe_extraction_filename(name), used), mime="text/csv",
+                         size=len(data), source_mime="text/csv", kind='embedded', data=data, csv_keys=[b['key']])
+            res.append(r); b['target'] = r
+        self._blocks = blocks
+
+    # -- turning stored text back into files that reference each other by path
+    def restore_text(self, r: Resource) -> bytes:
+        """Stored bytes of a file resource with arcager-res:N tokens turned back into relative paths.
+
+        For index.html, inline tables written by --merge become <link rel="csv"> again.
+        """
+        data = self.raw(r.index)
+        if normalize_mime(r.mime) not in _TOKEN_TEXT_MIMES:
+            return data
+        text = data.decode('utf-8', errors='replace')
+        if r.is_root:
+            for b in sorted(self.table_blocks(), key=lambda b: -b['span'][0]):
+                t = b.get('target')
+                if t is not None and (b['src'] or t.kind == 'file'):
+                    link = f'<link rel="csv" href="{escape_attr(relative_url(t.out_path, r.out_path))}">'
+                    text = text[:b['span'][0]] + link + text[b['span'][1]:]
+        missing = [0]
+        def rr(m):
+            j = int(m.group(1)); target = self._path_of.get(j)
+            if target is None:
+                missing[0] += 1; return m.group(0)
+            return relative_url(target, r.out_path) + (m.group(2) or '')
+        return TOKEN_RE.sub(rr, text).encode('utf-8')
+
+    def referenced_paths(self, r: Resource):
+        """out_paths of the resources a file resource points at (used to warn about partial extractions)."""
+        if r.kind != 'file' or normalize_mime(r.mime) not in _TOKEN_TEXT_MIMES:
+            return set()
+        text = self.raw(r.index).decode('utf-8', errors='replace')
+        found = {self._path_of[int(m.group(1))] for m in TOKEN_RE.finditer(text) if int(m.group(1)) in self._path_of}
+        if r.is_root:
+            found |= {b['target'].out_path for b in self.table_blocks() if b.get('target') is not None and (b['src'] or b['target'].kind == 'file')}
+        found.discard(r.out_path)
+        return found
 
 
-def list_hidden_bundle(path, content, opts):
-    hm=re.search(r'<script[^>]*id=[\'"]__hid[\'"][^>]*>([\s\S]*?)</script>',content,re.I)
+# ---------- selection ----------
+def _only_match(r: Resource, patterns) -> bool:
+    names = {r.out_path.lower(), r.raw_path.lower(), posixpath.basename(r.out_path).lower(),
+             posixpath.splitext(r.out_path)[0].lower()}
+    names |= {k.lower() for k in r.csv_keys} | {a.lower() for a in r.aliases}
+    for pat in patterns:
+        p = pat.strip().lower().replace("\\", "/")
+        if p.startswith("./"):
+            p = p[2:]
+        if p.endswith("/"):
+            p += "*"
+        if any(fnmatch.fnmatchcase(n, p) for n in names):
+            return True
+    return False
+
+
+def select_resources(resources, types, only):
+    out = []
+    for r in resources:
+        if r.kind == 'hidden':
+            continue
+        if not any(matches_type(r.mime, t) for t in types):
+            continue
+        if only and not _only_match(r, only):
+            continue
+        out.append(r)
+    return out
+
+
+def _type_summary(resources) -> str:
+    counts = defaultdict(int)
+    for r in resources:
+        counts[r.category] += 1
+    return ", ".join(f"{k} ({v})" for k, v in sorted(counts.items())) or "nothing"
+
+
+def _no_match_hint(view_resources, types, only) -> str:
+    bits = []
+    if only:
+        bits.append(f"no resource name matches {', '.join(repr(x) for x in only)}")
+    else:
+        bits.append(f"no resource matches type {','.join(types)}")
+    bits.append(f"this package contains: {_type_summary(view_resources)}")
+    if only:
+        sample = [r.out_path for r in view_resources[:5]]
+        bits.append("names look like: " + ", ".join(sample) + (" …" if len(view_resources) > 5 else ""))
+        bits.append("patterns are case-insensitive and may use * and ?, e.g. --only 'data/*.csv'")
+    else:
+        bits.append("use -l all to see everything")
+    return "; ".join(bits)
+
+
+# ---------- hidden bundle ----------
+def load_hidden_bundle(content: str, opts, *, prompt: bool = True):
+    """Decrypt the hidden bundle. Returns None if the package has none, else [(name, bytes)]."""
+    hm = re.search(r'<script[^>]*id=[\'"]__hid[\'"][^>]*>([\s\S]*?)</script>', content, re.I)
     if not hm:
-        return []
-    mat=re.search(r'<script[^>]*id=[\'"]__hid[\'"][^>]*>',content,re.I)
-    attrs2=dict((k.lower(),v or v2) for k,v,v2 in re.findall(r'([\w-]+)=(?:"([^"]*)"|\'([^\']*)\')',mat.group(0)))
-    raw=z85_decode(hm.group(1),int(attrs2.get('data-n','0')))
+        return None
+    tag = re.search(r'<script[^>]*id=[\'"]__hid[\'"][^>]*>', content, re.I).group(0)
+    a = dict((k.lower(), v or v2) for k, v, v2 in re.findall(r'([\w-]+)=(?:"([^"]*)"|\'([^\']*)\')', tag))
+    raw = z85_decode(hm.group(1), int(a.get('data-n', '0')))
+    pw = opts.bundle_password or (prompt_password('Hidden bundle password: ') if prompt else None)
+    if pw is None:
+        return None
     try:
-        pw=opts.bundle_password or prompt_password('Hidden bundle password: ')
-        key=derive_key(pw,attrs2['data-s'],int(attrs2['data-i']))
-        if aes_decrypt(key,attrs2['data-civ'],base64.b64decode(attrs2['data-ck'])) != PASSWORD_CHECK:
-            raise ValueError
-        body=decompress_bytes(aes_decrypt(key,attrs2['data-iv'],raw),int(attrs2.get('data-c','0')))
-        head=struct.unpack_from('<8sII',body,0)
-        if head[0] != b'ARCAGHID': raise ValueError('invalid hidden bundle header')
-        ml=head[2]; meta=json.loads(body[16:16+ml].decode('utf-8'))
-        return [(name,n) for name,off,n in meta]
+        key = derive_key(pw, a['data-s'], int(a['data-i']))
+        if aes_decrypt(key, a['data-civ'], base64.b64decode(a['data-ck'])) != PASSWORD_CHECK:
+            raise ValueError("password check failed")
+        body = decompress_bytes(aes_decrypt(key, a['data-iv'], raw), int(a.get('data-c', '0')))
+        head = struct.unpack_from('<8sII', body, 0)
+        if head[0] != b'ARCAGHID':
+            raise ValueError('invalid hidden bundle header')
+        ml = head[2]; meta = json.loads(body[16:16 + ml].decode('utf-8')); payload = body[16 + ml:]
     except Exception as e:
-        raise RuntimeError('unable to inspect hidden bundle: incorrect password or corrupted data') from e
+        raise RuntimeError("cannot open the hidden bundle: wrong --bundle-password, or the data is damaged. "
+                           "The hidden bundle has its own password, separate from the package password.") from e
+    return [(name, payload[off:off + n]) for name, off, n in meta]
 
 
-def list_packed(path,opts):
-    content,attrs,C,key=parse_pack_for_cli(path,opts.password)
-    rows=[]
-    for i,n in enumerate(C['logical']):
-        p=C['physical'][n['physical']]; rows.append((n['path'],p['mime'],media_category(p['mime']),n['priority'],0,bool(p['flags']&1),i,p.get('source_mime',p['mime'])))
-    # sizes via offsets without decompressing entire package where stream raw boundaries are available;
-    # exact size of individual members is derivable from the metadata structure.
-    for i,r in enumerate(rows):
-        idx=r[6]; n=C['logical'][idx]; p=C['physical'][n['physical']]; s=C['streams'][p['stream']]
-        pi=n['physical']
-        sz=C['next_off'][pi]-p['off']
-        rows[i]=(r[0],r[1],r[2],r[3],sz,r[5],r[6],r[7])
-    types=opts.list_types
-    for row in rows:
-        if any(_matches_type(row[1],t) for t in types) or 'all' in types:
-            conv=("  ("+row[7]+" -> "+row[1]+")") if row[5] and row[7] != row[1] else ""
-            print(f"{row[2]:7} {str(row[4]).rjust(9)} {row[1]:32} {row[0]}{conv}")
-    if 'csv' in types or 'all' in types:
-        try:
-            root_i=next((i for i,n in enumerate(C['logical']) if n['path']=='index.html'),None)
-            if root_i is not None:
-                root_html=materialize_logical(C,root_i,{})
-                for blk in scan_csv_blocks(root_html.decode('utf-8',errors='replace')):
-                    print(f"{'csv':7} {str(len(blk['body'].encode('utf-8'))).rjust(9)} {'text/csv':32} {blk['key']}")
-        except Exception as e:
-            if opts.verbose:
-                warn(f"unable to inspect embedded CSV: {e}")
-    if 'pack' in types or 'all' in types:
-        try:
-            hidden=list_hidden_bundle(path,content,opts)
-            for name,nbytes in hidden:
-                print(f"{'pack':7} {str(nbytes).rjust(9)} {'opaque hidden bundle':32} {name}")
-        except RuntimeError as e:
-            if opts.verbose:
-                warn(str(e))
+def _hidden_resources(content, opts, types, only):
+    """Hidden bundle members as Resources, honoring the 'pack' / 'all' policy (see --help)."""
+    explicit = 'pack' in types
+    if not explicit and not ('all' in types and opts.bundle_password):
+        if 'all' in types and re.search(r'id=[\'"]__hid[\'"]', content):
+            warn("this package also contains a hidden encrypted bundle, which is not included. "
+                 "Add --bundle-password PASSWORD (or use the type 'pack') to include it.")
+        return []
+    items = load_hidden_bundle(content, opts, prompt=explicit)
+    if items is None:
+        if explicit:
+            warn("this package has no hidden bundle (nothing was added with -b PATH hidden).")
+        return []
+    out = []
+    for name, data in items:
+        r = Resource(raw_path=name, out_path=safe_extraction_filename(name), mime=mime_for(name), size=len(data), kind='hidden', data=data)
+        if only and not _only_match(r, only):
+            continue
+        out.append(r)
+    return out
+
+
+# ---------- list ----------
+def _print_listing(rows, total_resources, opts, title=None):
+    if title:
+        out(f"{C['bold']}{title}{C['reset']}")
+    out(f"{C['dim']}{'TYPE':7} {'BYTES':>9} {'MIME':32} PATH{C['reset']}")
+    for r in rows:
+        notes = []
+        if r.converted:
+            notes.append(f"stored as {r.mime}, was {r.source_mime}")
+        if r.csv_keys:
+            notes.append("exposed as arcager.csv." + ", arcager.csv.".join(r.csv_keys))
+        if r.kind == 'embedded':
+            notes.append("embedded in index.html")
+        if opts.verbose and r.aliases:
+            notes.append("also arcager.images[" + "], [".join(repr(a) for a in r.aliases) + "]")
+        suffix = f"   {C['dim']}({'; '.join(notes)}){C['reset']}" if notes else ""
+        out(f"{r.category:7} {r.size:>9} {r.mime:32} {r.out_path}{suffix}")
+    total = sum(r.size for r in rows if r.kind != 'embedded')   # embedded tables are already inside index.html
+    shown = len(rows)
+    hidden_from_view = total_resources - sum(1 for r in rows if r.kind != 'hidden')
+    tail = f"  ({hidden_from_view} more not shown by the current filter; use -l all)" if hidden_from_view > 0 else ""
+    out(f"{C['dim']}{shown} resource{'s' if shown != 1 else ''} · {size_str(total)} stored{tail}{C['reset']}")
+
+
+def list_packed(path, opts):
+    view = PackageView(path, opts.password)
+    resources = view.catalog()
+    rows = select_resources(resources, opts.list_types, opts.only)
+    rows += _hidden_resources(view.content, opts, opts.list_types, opts.only)
+    if not rows:
+        warn(_no_match_hint(resources, opts.list_types, opts.only))
+        return []
+    _print_listing(rows, len(resources), opts, title=(path if len(opts.inputs) > 1 else None))
     return rows
 
 
-def list_unpacked(path,opts):
-    html=read_text(path); items=[]
-    for m in re.finditer(r'\b(?:src|href|poster|xlink:href)\s*=\s*([\'\"])([^\'\"]+)\1',html,re.I):
-        url=m.group(2); items.append((url,_mime_from_url(url)))
-    for m in re.finditer(r'\bsrcset\s*=\s*([\'\"])([^\'\"]+)\1',html,re.I):
+def _data_uri_size(payload: str) -> int:
+    clean = payload.replace("\n", "").replace("\r", "").strip()
+    return max(0, len(clean) * 3 // 4 - (len(clean) - len(clean.rstrip("="))))
+
+
+def list_unpacked(path, opts):
+    html = read_text(path)
+    items = []; seen = set()
+    def add(url):
+        if url in seen:
+            return
+        seen.add(url)
+        if url.lower().startswith("data:"):
+            m = _DATA_URI_RE.match(url)
+            mime = (m.group(1).split(";", 1)[0].lower() if m else "application/octet-stream")
+            size = _data_uri_size(m.group(2)) if m else 0
+            items.append((mime, size, f"(embedded data: URI, {mime})"))
+        else:
+            ext = " [external]" if url.lower().startswith(("http://", "https://", "//")) else ""
+            items.append((_mime_from_url(url), 0, url + ext))
+    for m in re.finditer(r'\b(?:src|href|poster|xlink:href)\s*=\s*([\'"])([^\'"]+)\1', html, re.I):
+        add(m.group(2))
+    for m in re.finditer(r'\bsrcset\s*=\s*([\'"])([^\'"]+)\1', html, re.I):
         for it in m.group(2).split(','):
-            toks=it.strip().split();
-            if toks: items.append((toks[0],mime_for(toks[0])))
-    for blk in scan_csv_blocks(html): items.append((blk['key'],'text/csv'))
-    for name,mime in items:
-        if any(_matches_type(mime,t) for t in opts.list_types) or 'all' in opts.list_types:
-            print(f"{media_category(mime):7} {mime:32} {name}")
-    return items
+            toks = it.strip().split()
+            if toks:
+                add(toks[0])
+    for blk in scan_csv_blocks(html):
+        items.append(("text/csv", len(blk['body'].encode('utf-8')), f"{blk['key']}.csv (embedded table)"))
+    rows = [it for it in items if any(matches_type(it[0], t) for t in opts.list_types)]
+    warn(f"{path} is a plain HTML file, not an Arcager package; listing the resources it references "
+         f"(sizes are only known for embedded ones).")
+    out(f"{C['dim']}{'TYPE':7} {'BYTES':>9} {'MIME':32} REFERENCE{C['reset']}")
+    for mime, size, name in rows:
+        out(f"{media_category(mime):7} {(size or '-'):>9} {mime:32} {name}")
+    out(f"{C['dim']}{len(rows)} reference{'s' if len(rows) != 1 else ''}{C['reset']}")
+    return rows
 
 
 def _mime_from_url(url):
-    p=url.split('?',1)[0].split('#',1)[0]; return mime_for(p)
+    p = url.split('?', 1)[0].split('#', 1)[0]; return mime_for(p)
 
 
-def extraction_name(path,mime):
-    p=Path(path)
-    ext=_EXT_BY_MIME.get(mime,p.suffix or '.bin')
-    if p.suffix.lower()==ext.lower(): return str(p)
-    return str(p.with_suffix(ext))
+# ---------- extract ----------
+def _write_resource(dest, r: Resource, data: bytes):
+    outp = os.path.join(dest, r.out_path.replace('/', os.sep))
+    write_bytes(outp, data)
+    return outp
 
 
-def extract_packed(path,opts,dest):
-    content,attrs,C,key=parse_pack_for_cli(path,opts.password)
-    os.makedirs(dest,exist_ok=True); cache={}; count=0
-    for i,n in enumerate(C['logical']):
-        if n['flags']&8 or n['path']=='index.html': continue
-        p=C['physical'][n['physical']];
-        if not ('all' in opts.extract_types or any(_matches_type(p['mime'],t) for t in opts.extract_types)): continue
-        data=materialize_logical(C,i,cache); rel=extraction_name(n['path'],p['mime']); outp=os.path.join(dest,rel.replace('/',os.sep)); os.makedirs(os.path.dirname(outp),exist_ok=True); write_bytes(outp,data); count+=1
-    # Hidden bundle metadata remains outside core and is extracted separately below.
-    hm=re.search(r'<script[^>]*id=[\'\"]__hid[\'\"][^>]*>([\s\S]*?)</script>',content,re.I)
-    if hm and ('all' in opts.extract_types or 'pack' in opts.extract_types):
-        mat=re.search(r'<script[^>]*id=[\'\"]__hid[\'\"][^>]*>',content,re.I).group(0)
-        attrs2=dict((k.lower(),v or v2) for k,v,v2 in re.findall(r'([\w-]+)=(?:"([^"]*)"|\'([^\']*)\')',mat))
-        raw=z85_decode(hm.group(1),int(attrs2.get('data-n','0')))
-        pw=opts.bundle_password or prompt_password('Hidden bundle password: '); key2=derive_key(pw,attrs2['data-s'],int(attrs2['data-i']))
-        try:
-            if aes_decrypt(key2,attrs2['data-civ'],base64.b64decode(attrs2['data-ck']))!=PASSWORD_CHECK: raise ValueError
-            body=aes_decrypt(key2,attrs2['data-iv'],raw)
-            body=decompress_bytes(body,int(attrs2.get('data-c','0')))
-        except Exception: raise RuntimeError('incorrect hidden bundle password or corrupted ciphertext')
-        head=struct.unpack_from('<8sII',body,0); 
-        if head[0]!=b'ARCAGHID': raise RuntimeError('invalid hidden bundle container')
-        ml=head[2]; meta=json.loads(body[16:16+ml].decode('utf-8')); payload=body[16+ml:]
-        for name,off,n in meta:
-            outp=os.path.join(dest,name); os.makedirs(os.path.dirname(outp),exist_ok=True); write_bytes(outp,payload[off:off+n]); count+=1
-    # CSV/TSV blocks embedded in the root remain a first-class extracted resource.
-    if 'csv' in opts.extract_types or 'all' in opts.extract_types:
-        root_i=next((i for i,n in enumerate(C['logical']) if n['path']=='index.html'),None)
-        if root_i is not None:
-            root_html=materialize_logical(C,root_i,cache).decode('utf-8',errors='replace')
-            for blk in scan_csv_blocks(root_html):
-                name=safe_extraction_filename(blk['key']+'.csv')
-                outp=os.path.join(dest,name); write_text(outp,blk['body']+("\n" if blk['body'] and not blk['body'].endswith("\n") else "")); count+=1
-    return count
+def extract_packed(path, opts, dest):
+    """Write the selected resources below `dest`. Returns {'count': n, 'files': [...]}."""
+    view = PackageView(path, opts.password)
+    resources = view.catalog()
+    chosen = select_resources(resources, opts.extract_types, opts.only)
+    chosen += _hidden_resources(view.content, opts, opts.extract_types, opts.only)
+    _check_overwrite(dest, [r.out_path for r in chosen], opts)
+    written = []; chosen_paths = {r.out_path for r in chosen if r.kind != 'hidden'}
+    dangling = set()
+    for r in chosen:
+        if r.kind == 'file':
+            data = view.restore_text(r)
+            dangling |= {p for p in view.referenced_paths(r) if p not in chosen_paths}
+        else:
+            data = r.data
+        _write_resource(dest, r, data)
+        written.append((r.out_path, len(data)))
+    if not chosen:
+        warn(_no_match_hint(resources, opts.extract_types, opts.only))
+    elif dangling:
+        warn(f"the extracted pages refer to {len(dangling)} resource(s) that were not extracted "
+             f"(e.g. {sorted(dangling)[0]}). Extract with -x all for a complete, working folder.")
+    return {"count": len(written), "files": written}
+
 
 def extract_unpacked(path, opts, dest):
+    """Plain (non-Arcager) HTML: pull out embedded data: URIs and CSV tables."""
     html = read_text(path)
-    os.makedirs(dest, exist_ok=True)
     base = Path(path).stem
-    count = 0
+    pending = []
     for i, m in enumerate(_DATA_URI_RE.finditer(html)):
         head, payload = m.group(1), m.group(2)
         mime = head.split(';', 1)[0].lower()
-        if not any(_matches_type(mime, t) for t in opts.extract_types):
+        if not any(matches_type(mime, t) for t in opts.extract_types):
             continue
         try:
             raw = base64.b64decode(payload.replace("\n", "").replace("\r", ""), validate=False)
         except Exception:
             continue
-        ext = _EXT_BY_MIME.get(mime, ".bin")
-        outp = os.path.join(dest, f"{base}_datauri_{i:04d}{ext}")
-        write_bytes(outp, raw); count += 1
-    if 'csv' in opts.extract_types or 'all' in opts.extract_types:
+        pending.append((f"{base}_datauri_{i:04d}{_EXT_BY_MIME.get(mime, '.bin')}", raw))
+    if any(matches_type("text/csv", t) for t in opts.extract_types):
         for blk in scan_csv_blocks(html):
-            name = safe_extraction_filename(blk['key'] + '.csv')
-            outp = os.path.join(dest, name)
-            write_text(outp, blk['body'] + ("\n" if blk['body'] and not blk['body'].endswith("\n") else "")); count += 1
-    return count
+            name = safe_extraction_filename(blk['src'] or (blk['key'] + '.csv'))
+            body = blk['body_raw'] if blk['exact'] else blk['body'] + ("\n" if blk['body'] and not blk['body'].endswith("\n") else "")
+            pending.append((name, body.encode('utf-8')))
+    if not pending:
+        warn(f"{path} is a plain HTML file (not an Arcager package) and contains no embedded data: URIs or CSV tables "
+             f"matching '{','.join(opts.extract_types)}'. To extract resources from a package, point -x at the packed_*.html file.")
+        return {"count": 0, "files": []}
+    _check_overwrite(dest, [n for n, _ in pending], opts)
+    os.makedirs(dest, exist_ok=True)
+    for name, raw in pending:
+        write_bytes(os.path.join(dest, name.replace('/', os.sep)), raw)
+    return {"count": len(pending), "files": [(n, len(d)) for n, d in pending]}
 
 
-def safe_extraction_filename(name: str) -> str:
-    p = Path(name.replace("\\", "/"))
-    parts = [x for x in p.parts if x not in ("", ".", "..")]
-    return "/".join(parts) if parts else "item.bin"
+# ---------- unpack (-u): one self-contained HTML file, text kept as text ----------
+_PCT_SAFE = "".join(chr(c) for c in range(0x20, 0x7f) if chr(c) not in '%#"\'\\&<>`')
+_PCT_SAFE_STRICT = _PCT_SAFE.replace(" ", "").replace("(", "").replace(")", "")
+
+
+def pct_text(text: str, strict: bool = False) -> str:
+    """Percent-encode text for a data: URL, leaving ordinary characters readable.
+
+    strict=True additionally encodes space and parentheses so the result is safe
+    inside an unquoted CSS url(...).
+    """
+    return urllib.parse.quote(text, safe=_PCT_SAFE_STRICT if strict else _PCT_SAFE)
+
+
+def _strip_text_prefix(text: str) -> str:
+    return text[1:] if text.startswith("\ufeff") else text
+
+
+class _Unpacker:
+    """Turns a package's root page back into one standalone HTML document."""
+
+    def __init__(self, view: PackageView):
+        self.v = view; self.C = view.C
+        self.memo = {}; self.visiting = set()
+        self.stats = defaultdict(int)
+        self.cycle_paths = set()
+        view.catalog()
+        self.by_path = None
+
+    # -- resources
+    def valid(self, j): return 0 <= j < len(self.C['logical'])
+    def mime(self, j): return normalize_mime(self.v.mime(j))
+    def path(self, j): return self.C['logical'][j]['path']
+    def legacy(self, j): return self.path(j).startswith("__data__/")   # came from an inline data: URI in the source
+
+    def resolved(self, j: int) -> bytes:
+        """Stored bytes with tokens inside text resources replaced by data: URLs."""
+        if j in self.memo:
+            return self.memo[j]
+        raw = self.v.raw(j)
+        if self.mime(j) not in _TOKEN_TEXT_MIMES:
+            return raw
+        if j in self.visiting:
+            self.cycle_paths.add(self.path(j)); return raw
+        self.visiting.add(j)
+        try:
+            text = raw.decode('utf-8', errors='replace')
+            text = TOKEN_RE.sub(lambda m: self._token_url(m, strict=True), text)
+            data = text.encode('utf-8')
+        finally:
+            self.visiting.discard(j)
+        self.memo[j] = data
+        return data
+
+    def data_url(self, j: int, strict: bool = False) -> str:
+        mime = self.mime(j); data = self.resolved(j)
+        if mime in _TEXT_URL_MIMES and not self.legacy(j):
+            self.stats['text_uris'] += 1
+            return f"data:{mime};charset=utf-8,{pct_text(data.decode('utf-8', errors='replace'), strict)}"
+        self.stats['binary_uris' if mime not in _TEXT_URL_MIMES else 'text_uris_base64'] += 1
+        return logical_to_data_uri(data, self.v.C['physical'][self.C['logical'][j]['physical']]['mime'])
+
+    def _token_url(self, m, strict=False) -> str:
+        j = int(m.group(1)); suffix = m.group(2) or ''
+        if not self.valid(j):
+            self.stats['unresolved'] += 1; return m.group(0)
+        frag = suffix[suffix.index('#'):] if '#' in suffix else ''     # ?query is meaningless in a data: URL
+        return self.data_url(j, strict) + frag
+
+    def _token_repl_in(self, m):
+        before = m.string[max(0, m.start() - 12):m.start()]
+        strict = bool(re.search(r'url\(\s*[\'"]?$|@import\s+[\'"]?$', before, re.I))
+        return self._token_url(m, strict)
+
+    # -- relative references that were never tokenized (standalone packs with visible bundles)
+    def _plain_map(self):
+        if self.by_path is None:
+            self.by_path = {}
+            for i, n in enumerate(self.C['logical']):
+                if n['flags'] & 8:
+                    continue
+                p = n['path']
+                while p.startswith("./"): p = p[2:]
+                p = p.lstrip("/")
+                self.by_path[p] = i
+                if posixpath.splitext(p)[1]:
+                    self.by_path[posixpath.splitext(p)[0]] = i
+                    self.by_path[posixpath.basename(p)] = i
+        return self.by_path
+
+    def _resolve_plain(self, url):
+        base = split_ref(url)[0]
+        m = self._plain_map()
+        keys = [base, base.lstrip('/'), urllib.parse.unquote(base)]
+        while base.startswith("./"): base = base[2:]; keys.append(base)
+        if posixpath.splitext(base)[1]: keys.append(posixpath.splitext(base)[0])
+        for k in keys:
+            if k in m: return m[k]
+        return None
+
+    def plain_refs(self, html: str) -> str:
+        def attr_plain(m):
+            attr, q, url = m.group(1), m.group(2), m.group(3)
+            if is_external(url) or url.startswith("arcager-res:"): return m.group(0)
+            j = self._resolve_plain(url)
+            if j is None: return m.group(0)
+            frag = split_ref(url)[1]; frag = frag[frag.index('#'):] if '#' in frag else ''
+            return f'{attr}={q}{self.data_url(j)}{frag}{q}'
+        html = re.sub(r'\b(src|href|poster|xlink:href)\s*=\s*(["\'])([^"\']+)\2', attr_plain, html, flags=re.I)
+        def css_plain(m):
+            q, url = m.group(1), m.group(2)
+            if is_external(url) or url.startswith("arcager-res:"): return m.group(0)
+            j = self._resolve_plain(url)
+            if j is None: return m.group(0)
+            frag = split_ref(url)[1]; frag = frag[frag.index('#'):] if '#' in frag else ''
+            return f'url({q}{self.data_url(j, strict=True)}{frag}{q})'
+        return _CSS_URL_RE.sub(css_plain, html)
+
+    # -- <link rel=stylesheet href=token> and <script src=token> -> inline text
+    @staticmethod
+    def _attrs(text):
+        return [(m.group(0), m.group(1).lower(), (m.group(2) if m.group(2) is not None else m.group(3) if m.group(3) is not None else m.group(4)))
+                for m in _ATTR_RE.finditer(text)]
+
+    def _text_of(self, j) -> str:
+        return _strip_text_prefix(self.resolved(j).decode('utf-8', errors='replace'))
+
+    def inline_structural(self, html: str) -> str:
+        deferred = []
+        keep_style = {"media", "id", "class", "title", "nonce"}
+
+        def link_sub(m):
+            tag = m.group(0)
+            attrs = self._attrs(tag[len("<link"):].rstrip(">").rstrip("/"))
+            d = {n: v for _, n, v in attrs}
+            href = d.get("href") or ""
+            tm = TOKEN_RE.fullmatch(href)
+            if not tm or "stylesheet" not in (d.get("rel") or "").lower().split() or "alternate" in (d.get("rel") or "").lower().split():
+                return tag
+            j = int(tm.group(1))
+            if not self.valid(j) or self.mime(j) != "text/css" or self.legacy(j):
+                return tag
+            css = self._text_of(j)
+            css = re.sub(r'^\s*@charset\s+"[^"]*"\s*;\s*', '', css, count=1, flags=re.I)
+            css = re.sub(r'</(style)', r'<\\/\1', css, flags=re.I)
+            kept = "".join(" " + raw for raw, n, _ in attrs if n in keep_style or n.startswith("data-"))
+            self.stats['inlined_css'] += 1
+            return f"<style{kept}>\n{css.strip(chr(10))}\n</style>"
+
+        def script_sub(m):
+            pre, url, post = m.group(1), m.group(3), m.group(4)
+            tm = TOKEN_RE.fullmatch(url)
+            if not tm:
+                return m.group(0)
+            j = int(tm.group(1))
+            if not self.valid(j) or self.mime(j) not in ("text/javascript", "application/javascript") or self.legacy(j):
+                return m.group(0)
+            attrs = self._attrs(pre) + self._attrs(post)
+            d = {n: v for _, n, v in attrs}
+            typ = (d.get("type") or "").strip().lower()
+            if typ not in ("", "module", "text/javascript", "application/javascript"):
+                return m.group(0)
+            module = typ == "module"
+            drop = {"src", "defer", "crossorigin", "integrity", "referrerpolicy", "fetchpriority", "blocking"}
+            if not module:
+                drop.add("async")      # inline classic scripts are never async
+            kept = "".join(" " + raw for raw, n, _ in attrs if n not in drop)
+            js = self._text_of(j)
+            js = re.sub(r'</(script)', r'<\\/\1', js, flags=re.I)
+            if re.search(r'<script', js, re.I):
+                js = js.replace("<!--", "<\\!--")
+            node = f"<script{kept}>\n{js.strip(chr(10))}\n</script>"
+            self.stats['inlined_js'] += 1
+            if "defer" in d and not module:
+                deferred.append(node)   # an inline script cannot be deferred; run it after the page is parsed instead
+                return ""
+            return node
+
+        html = _LINK_RE.sub(link_sub, html)
+        html = _SCRIPT_SRC_RE.sub(script_sub, html)
+        if deferred:
+            block = "\n".join(deferred) + "\n"
+            idx = html.lower().rfind("</body>")
+            html = html + block if idx < 0 else html[:idx] + block + html[idx:]
+        return html
+
+    def build(self) -> str:
+        html = self.v.root_text()
+        html = self.plain_refs(html)
+        html = self.inline_structural(html)
+        html = TOKEN_RE.sub(self._token_repl_in, html)
+        return html
+
+
+def unpack_packed(path, opts, out_name):
+    view = PackageView(path, opts.password)
+    if view.root_index is None:
+        raise RuntimeError("v4 root HTML resource missing; the package may be damaged. Re-create it from the original sources.")
+    up = _Unpacker(view)
+    html = up.build()
+    write_text(out_name, html)
+    if up.cycle_paths:
+        warn("these resources reference each other in a loop, so one reference was left as arcager-res:N: "
+             + ", ".join(sorted(up.cycle_paths)))
+    if up.stats['unresolved']:
+        warn(f"{up.stats['unresolved']} reference(s) pointed at resources that are not in the package and were left unchanged "
+             f"(look for 'arcager-res:' in {out_name}). The package may be damaged or was edited by hand.")
+    return {"inSize": len(view.content.encode()), "outSize": len(html.encode()), "restored": len([r for r in view.catalog() if r.kind == 'file']),
+            "inlined_css": up.stats['inlined_css'], "inlined_js": up.stats['inlined_js'],
+            "text_uris": up.stats['text_uris'], "binary_uris": up.stats['binary_uris']}
+
 
 # ---------- CLI ----------
+class UsageError(RuntimeError):
+    """A mistake in how Arcager was invoked. The message must say how to fix it."""
+
+
 @dataclasses.dataclass
 class Opts:
     compression: str='gzip'
@@ -2191,93 +2935,274 @@ class Opts:
     extract_mode: bool=False
     list_types: list=dataclasses.field(default_factory=lambda:['all'])
     extract_types: list=dataclasses.field(default_factory=lambda:['all'])
+    only: list=dataclasses.field(default_factory=list)
+    skip_unused: bool=False
+    seen_pack_options: list=dataclasses.field(default_factory=list)   # pack-only options the user typed (for misuse warnings)
+
+
+_KNOWN_OPTIONS = ("-h", "--help", "-V", "--version", "-v", "--verbose", "-f", "--force", "-r", "--recursive",
+                  "-u", "--unpack", "-M", "--merge", "-o", "--output", "-O", "--output-dir", "--prefix",
+                  "-E", "--encrypt", "--password", "--bundle-password", "--strip-metadata", "--base-href",
+                  "--ignore-uris", "--skip-unused", "-m", "--minify", "-c", "--compression", "-b", "--bundle",
+                  "-l", "--list", "-x", "--extract", "--only")
+
+
+def help_text() -> str:
+    w = max(len(t[0]) for t in TYPE_INFO)
+    types = "\n".join(f"  {name:<{w}}  {summary}\n  {'':<{w}}  matches: {what}" for name, summary, what in TYPE_INFO)
+    return f"""arcager {VERSION} — turn an HTML page or a static site into ONE self-unpacking HTML file
+
+USAGE
+  arcager [options] PAGE.html...     pack pages            -> packed_PAGE.html
+  arcager -M SITE_DIR [options]      pack a whole site     -> packed_SITE_DIR.html
+  arcager -l [TYPES] PACKED.html     list what is inside
+  arcager -x [TYPES] PACKED.html     extract files from the package
+  arcager -u PACKED.html             rebuild ONE standalone, readable HTML page
+  (Run as `python arcager.py ...` if arcager is not installed as a command.)
+
+START HERE
+  arcager page.html                  pack a page (GZIP, originals kept untouched)
+  arcager -M ./site                  pack a folder that has an index.html
+  arcager -l packed_site.html        see what is inside
+  arcager -x all -O ./out packed_site.html     get every file back, ready to re-pack
+  arcager -u packed_site.html        get a single readable HTML file back
+
+PACKING
+  -M, --merge DIR      Pack a static site. Starts at DIR/index.html and follows its
+                       CSS, JS, images, fonts and <link rel="csv"> tables. Other files
+                       in DIR are kept too, in case your scripts load them later, and
+                       Arcager warns you which files nothing links to.
+  --skip-unused        With -M: leave out files that nothing links to (smaller package).
+                       Only do this if your scripts never build file names at run time.
+  -c, --compression gzip|brotli [lossy]
+                       gzip   (default) works everywhere, no extra packages.
+                       brotli smaller output; needs: pip install brotli
+                       lossy  (write it right after the algorithm) lets Arcager try to
+                              convert PNG/JPEG/BMP/GIF to lossless WebP. A conversion is
+                              kept only if it is verified and smaller. Needs: pip install Pillow
+                       Examples:  -c gzip   -c brotli   -c gzip lossy   -c brotli lossy
+                       Default packing preserves original representations; nothing is
+                       converted unless you add 'lossy'.
+  --strip-metadata     Remove non-essential image metadata (e.g. EXIF, GPS) where safe.
+                       Needs: pip install Pillow
+  -E, --encrypt        Encrypt the whole package (AES-256-GCM). You are asked for a
+                       password; opening the page asks for it again.
+  -b, --bundle PATH [hidden]
+                       Add extra files (a folder, a .zip/.tar archive or one file).
+                       Visible bundles are available to your page (see arcager.images).
+                       'hidden' stores them as an opaque encrypted payload with its own
+                       password that the page never reads; extract it with -x pack.
+  -m, --minify [lossy] Shrink Arcager's own loader script (needs: npm install -g terser).
+                       'lossy' also minifies your HTML (comments/whitespace are removed).
+  -r, --recursive      When an input is a folder, also pack the HTML files in its subfolders.
+  --base-href URL      Insert <base href="URL"> so relative links resolve against URL.
+  --ignore-uris LIST   Comma-separated MIME prefixes of data: URIs to leave inline,
+                       e.g. --ignore-uris image/svg,font/
+  Output size is reported for every file as a percentage of the original (e.g. 37.6%
+  means the package is 37.6% of the source size) and as a factor (e.g. 2.66×).
+  Already-compressed content (JPEG, PNG, video, WOFF2) cannot shrink much.
+
+LIST / EXTRACT / UNPACK
+  -l, --list [TYPES]   Show every resource once, with its type, size and path.
+  -x, --extract [TYPES]
+                       Write resources to disk (default folder: ./extracted).
+                       Pages and styles come back as normal files that reference each
+                       other by relative path, so the folder can be re-packed with -M.
+                       Resources are written in their stored form: an image that was
+                       converted to WebP comes back as WebP.
+  --only PATTERN[,..]  Limit -l/-x to resources whose path, file name or table key
+                       matches. * and ? are wildcards, case-insensitive.
+                       e.g.  -x all --only 'data/*.csv'      --only elements
+  -u, --unpack         Rebuild one self-contained HTML file. CSS and JavaScript become
+                       normal <style> and <script> text; only images, fonts and other
+                       binary files stay embedded as base64.
+
+RESOURCE TYPES  (for -l and -x; comma-separated, default: all; e.g. -l docs,csv)
+{types}
+  If you ask for a type that is not present, Arcager tells you what the package
+  does contain.
+
+PASSWORDS
+  --password PW          Package password (when packing with -E, or opening one).
+  --bundle-password PW   Password of the hidden bundle (-b PATH hidden).
+  Leave them out and Arcager asks, without echoing. Passwords on the command line can
+  be seen in shell history and process lists, so prefer the prompt on shared machines.
+
+OUTPUT LOCATION AND NAMES
+  -o FILE      exact output file (one input only)      -O DIR   output folder
+  --prefix P   prefix for packed file names (default: packed_; unpacked files are unpacked_)
+  -f, --force  overwrite existing files without asking   -v, --verbose  show details
+  -V, --version  version and which components are installed (incl. Terser)    -h, --help  this text
+
+EXIT CODES
+  0 success    1 usage error or unreadable input    2 some files failed
+  3 nothing processed (every input skipped, or -x found nothing)    130 interrupted
+
+REQUIREMENTS
+  Python 3.8+ and the 'cryptography' package (pip install -r requirements.txt): encryption
+  is part of Arcager itself. Optional extras: Brotli, Pillow, Terser (-V shows what is found).
+
+MORE
+  README.md            overview and examples         docs/CLI.md   command reference
+  docs/API.md          window.arcager (images + CSV) docs/ARCHITECTURE.md   internals
+  Extras: pip install -r requirements-optional.txt            Check your setup: arcager -V
+"""
+
+
+def _suggest(word: str, choices) -> str:
+    m = difflib.get_close_matches(word, list(choices), n=1, cutoff=0.6)
+    return f" Did you mean '{m[0]}'?" if m else ""
+
+
+def _type_error(token: str) -> UsageError:
+    bad = [x.strip() for x in token.split(',') if x.strip() and x.strip().lower() not in _LIST_TYPES]
+    hint = "".join(_suggest(b.lower(), _LIST_TYPES) for b in bad[:1])
+    return UsageError(
+        f"'{token}' is not a resource type, and no file with that name exists.{hint}\n"
+        f"  Types: {_TYPE_ORDER_HINT}\n"
+        f"  To pick resources by name instead of type, use --only, e.g.  -x all --only '{bad[0] if bad else token}*'")
 
 
 def parse_cli(argv):
     if any(a in ('-h','--help') for a in argv):
-        print(f"arcager {VERSION} — single-file HTML packager\n\nUsage:\n  arcager [options] <input...>\n  arcager -M <dir> [options]\n  arcager -u [options] <packed.html>\n  arcager -l [TYPE,...] <input...>\n  arcager -x [TYPE,...] <input...>\n\nCompression:\n  -c gzip             compatible default compression\n  -c brotli           higher-density optional compression\n  -c gzip lossy       permits representation-changing media optimization\n  -c brotli lossy     permits representation-changing media optimization\n\nOther core options:\n  --strip-metadata    explicitly remove non-essential privacy metadata\n  -m, --minify [lossy]  minify the runtime JS when Terser is available; lossy also minifies HTML payload\n  -E, --encrypt       AES-256-GCM protection for the v4 container\n  -b, --bundle PATH [hidden]  visible or opaque hidden bundle\n  -M, --merge DIR     merge a static-site entry point\n  -l, --list TYPE     list resources\n  -x, --extract TYPE  extract resources\n  -u, --unpack        restore the root HTML\n  -r, --recursive     recursively scan HTML inputs\n  -O, --output-dir DIR / -o PATH / --prefix PREFIX\n  -f, --force         overwrite without prompting\n  -v, --verbose       detailed diagnostics\n\nDefault packing preserves original representations. 'lossy' permits representation changes. Metadata removal is never automatic.")
-        raise SystemExit(0)
+        print(help_text()); raise SystemExit(0)
     if any(a in ('-V','--version') for a in argv):
-        print(f"arcager {VERSION}"); raise SystemExit(0)
+        print(version_text()); raise SystemExit(0)
+    # -fv style clusters of flags that take no value
+    expanded = []
+    for a in argv:
+        if re.fullmatch(r'-[vfruE]{2,}', a):
+            expanded.extend('-' + ch for ch in a[1:])
+        else:
+            expanded.append(a)
+    argv = expanded
     o=Opts(); i=0
+    pending_type=[None]     # (token, list_or_extract) most recently taken as TYPES
+    def value(opt, what):
+        nonlocal i
+        i+=1
+        if i>=len(argv) or (argv[i] in _KNOWN_OPTIONS and opt not in ('--password','--bundle-password')):
+            raise UsageError(f"{opt} needs {what}." + ("" if "e.g." in what else f" Example: {opt} {'./site' if what.startswith('a folder containing') else 'VALUE'}"))
+        return argv[i]
+    def type_arg(opt):
+        """Optional TYPES after -l/-x. A word that is neither a type list nor a plausible path is a mistake worth explaining."""
+        nonlocal i
+        if i+1>=len(argv) or argv[i+1].startswith('-'):
+            return None
+        nxt=argv[i+1]
+        if _valid_type_list(nxt):
+            i+=1; pending_type[0]=(nxt,opt)
+            return [x.strip().lower() for x in nxt.split(',') if x.strip()]
+        if os.path.exists(nxt) or re.search(r'[\\/]|\.\w+$', nxt):
+            return None                      # looks like (or is) a file: leave it for the input list
+        raise _type_error(nxt)
     while i<len(argv):
         a=argv[i]
         if a in ('-v','--verbose'): o.verbose=True
         elif a in ('-f','--force'): o.force=True
-        elif a in ('-r','--recursive'): o.recursive=True
+        elif a in ('-r','--recursive'): o.recursive=True; o.seen_pack_options.append(a)
         elif a in ('-u','--unpack'): o.unpack=True
         elif a in ('-M','--merge'):
-            i+=1; o.merge=argv[i]
+            o.merge=value(a,'a folder containing index.html')
         elif a in ('-o','--output'):
-            i+=1; o.output=argv[i]
+            o.output=value(a,'a file name')
         elif a in ('-O','--output-dir'):
-            i+=1; o.output_dir=argv[i]
-        elif a=='--prefix': i+=1; o.prefix=argv[i]
-        elif a in ('-E','--encrypt'): o.encrypt=True
-        elif a=='--password': i+=1; o.password=argv[i]
-        elif a=='--bundle-password': i+=1; o.bundle_password=argv[i]
-        elif a=='--strip-metadata': o.strip_metadata=True
-        elif a=='--base-href': i+=1; o.base_href=argv[i]
-        elif a=='--ignore-uris': i+=1; o.ignore_uris=[x.strip() for x in argv[i].split(',') if x.strip()]
+            o.output_dir=value(a,'a folder name')
+        elif a=='--prefix': o.prefix=value(a,'a text prefix')
+        elif a in ('-E','--encrypt'): o.encrypt=True; o.seen_pack_options.append(a)
+        elif a=='--password': o.password=value(a,'a password')
+        elif a=='--bundle-password': o.bundle_password=value(a,'a password')
+        elif a=='--skip-unused': o.skip_unused=True; o.seen_pack_options.append(a)
+        elif a=='--strip-metadata': o.strip_metadata=True; o.seen_pack_options.append(a)
+        elif a=='--base-href': o.base_href=value(a,'a URL'); o.seen_pack_options.append(a)
+        elif a=='--ignore-uris':
+            o.ignore_uris=[x.strip() for x in value(a,'a comma-separated list of MIME prefixes').split(',') if x.strip()]; o.seen_pack_options.append(a)
+        elif a=='--only':
+            o.only=[x.strip() for x in value(a,'a name or wildcard pattern, e.g. --only \'data/*.csv\'').split(',') if x.strip()]
         elif a in ('-m','--minify'):
-            o.minify=True
-            if i+1<len(argv) and argv[i+1].lower()=='lossy': i+=1; o.minify_lossy=True
+            o.minify=True; o.seen_pack_options.append(a)
+            if i+1<len(argv) and argv[i+1].lower()=='lossy' and not os.path.exists(argv[i+1]): i+=1; o.minify_lossy=True
         elif a in ('-c','--compression'):
+            if i+1>=len(argv): raise UsageError('-c needs an algorithm: gzip or brotli. Example: -c brotli')
             i+=1
-            if i>=len(argv): raise RuntimeError('-c requires gzip or brotli')
             algo=argv[i].lower()
-            if algo not in ('gzip','brotli'): raise RuntimeError('compression must be gzip or brotli')
-            o.algo=1 if algo=='gzip' else 2; o.compression=algo
-            if i+1<len(argv) and argv[i+1].lower()=='lossy': i+=1; o.lossy=True
+            if algo=='lossy': raise UsageError("'lossy' must come right after the algorithm, e.g. -c gzip lossy")
+            if algo not in ('gzip','brotli'): raise UsageError(f"unknown compression '{argv[i]}': choose gzip or brotli (e.g. -c brotli).{_suggest(algo,('gzip','brotli'))}")
+            o.algo=1 if algo=='gzip' else 2; o.compression=algo; o.seen_pack_options.append(a)
+            if i+1<len(argv) and argv[i+1].lower()=='lossy' and not os.path.exists(argv[i+1]): i+=1; o.lossy=True
         elif a in ('-b','--bundle'):
-            i+=1
-            if i>=len(argv): raise RuntimeError('-b needs a path')
-            path=argv[i]; hidden=False
-            if i+1<len(argv) and argv[i+1].lower()=='hidden': i+=1; hidden=True
-            o.bundles.append((path,hidden))
+            path=value(a,'a path (folder, .zip/.tar archive or file)'); hidden=False
+            if i+1<len(argv) and argv[i+1].lower()=='hidden' and not os.path.exists(argv[i+1]): i+=1; hidden=True
+            o.bundles.append((path,hidden)); o.seen_pack_options.append(a)
         elif a in ('-l','--list'):
             o.list_mode=True
-            if i+1<len(argv) and not argv[i+1].startswith('-') and _valid_type_list(argv[i+1]): i+=1; o.list_types=[x.strip() for x in argv[i].split(',') if x.strip()]
+            t=type_arg(a)
+            if t: o.list_types=t
         elif a in ('-x','--extract'):
             o.extract_mode=True
-            if i+1<len(argv) and not argv[i+1].startswith('-') and _valid_type_list(argv[i+1]): i+=1; o.extract_types=[x.strip() for x in argv[i].split(',') if x.strip()]
-        elif a.startswith('-'): raise RuntimeError('unknown option: '+a)
+            t=type_arg(a)
+            if t: o.extract_types=t
+        elif a=='lossy' and not os.path.exists(a):
+            raise UsageError("'lossy' must come right after the compression option, e.g.  -c gzip lossy  (see --help)")
+        elif a.startswith('-') and len(a)>1:
+            raise UsageError(f"unknown option '{a}'.{_suggest(a,_KNOWN_OPTIONS)} Run 'arcager --help' to see all options.")
         else: o.inputs.append(a)
         i+=1
-    if o.algo==2 and not o.compression: o.compression='brotli'
+    if not o.inputs and not o.merge and pending_type[0] and os.path.exists(pending_type[0][0]):
+        # e.g. `arcager -l docs` where `docs` is an existing file/folder and no TYPES were meant
+        o.inputs.append(pending_type[0][0])
+        if pending_type[0][1] in ('-l','--list'): o.list_types=['all']
+        else: o.extract_types=['all']
     return o
 
 
-def usage_status(result,i,total):
-    if result.get('status')=='ok':
-        arrow='↓' if result['outSize']<result['inSize'] else '↑'; mark='✓' if arrow=='↓' else '!'
-        out(f"  [{i}/{total}] {C['green'] if mark=='✓' else C['yellow']}{mark}{C['reset']} {os.path.basename(result['out']):34} {size_str(result['inSize']).rjust(10)} {arrow} {size_str(result['outSize']).rjust(10)}")
-    elif result.get('status','').startswith('skip'):
-        out(f"  [{i}/{total}] {C['yellow']}⚠{C['reset']} {os.path.basename(result.get('file','')):34} {result.get('status')}")
+def usage_status(result,i,total,mode='pack'):
+    st=result.get('status','')
+    name=os.path.basename(result.get('out') or result.get('file',''))
+    if st=='ok':
+        b,a=result['inSize'],result['outSize']
+        if mode=='unpack':
+            out(f"  [{i}/{total}] {C['green']}✓{C['reset']} {name:34} {size_str(b).rjust(10)} → {size_str(a).rjust(10)}  {C['dim']}{ratio_str(b,a)}{C['reset']}")
+        else:
+            smaller=a<b; mark='✓' if smaller else '!'; arrow='↓' if smaller else '↑'
+            out(f"  [{i}/{total}] {C['green'] if smaller else C['yellow']}{mark}{C['reset']} {name:34} {size_str(b).rjust(10)} {arrow} {size_str(a).rjust(10)}  {C['dim']}{ratio_str(b,a)}{C['reset']}")
+    elif st.startswith('skip'):
+        why={'skip-already-packed':"skipped — already-packed Arcager file; use -u to unpack it first",
+             'skip-no-overwrite':f"skipped — {os.path.basename(result.get('out',''))} already exists; use -f to overwrite",
+             'skip-not-packed':"skipped — not an Arcager package, nothing to unpack (to pack it, run without -u)",
+             'skip-unknown-version':"skipped — written by an Arcager version this release cannot read"}.get(st,st)
+        out(f"  [{i}/{total}] {C['yellow']}⚠{C['reset']} {os.path.basename(result.get('file','')):34} {why}")
     else:
         out(f"  [{i}/{total}] {C['red']}✗{C['reset']} {os.path.basename(result.get('file','')):34} {result.get('error','')}")
+
+
+def _hidden_bundle_block(opts, paths):
+    if not opts.bundle_password:
+        opts.bundle_password=prompt_password('Hidden bundle password: ',confirm=True)
+    entries=collect_hidden_bundles(paths)
+    hi=hidden_envelope(entries,opts.bundle_password,opts.algo)
+    block='<script type="text/plain" id="__hid" '+" ".join(f'{k}="{escape_attr(str(v))}"' for k,v in hi.items() if k!='data')+'>'+z85_script_safe(hi['data'])+'</script>'
+    return block, sum(len(e['data']) for e in entries)
 
 
 def build_single_file(file,opts,prompter,visible_entries):
     sig=read_signature(file)
     if sig is not None:
-        warn(f"{file}: already-packed Arcager file (v{sig}) skipped")
         return {'file':file,'status':'skip-already-packed'}
     raw=read_bytes(file); html=raw.decode('utf-8',errors='replace')
     stem=re.sub(r'\.html?$','',os.path.basename(file),flags=re.I); out_name=output_path(opts,(opts.prefix or _DEFAULT_PACK_PREFIX)+stem+'.html',os.path.dirname(file))
-    if os.path.abspath(out_name)==os.path.abspath(file): raise RuntimeError('output would overwrite input')
+    if os.path.abspath(out_name)==os.path.abspath(file): raise RuntimeError(f'the output would overwrite the input ({file}). Choose another name with -o or another folder with -O.')
     if not confirm_overwrite(out_name,opts.force): return {'file':file,'out':out_name,'status':'skip-no-overwrite'}
     hidden=[x for x in opts.bundles if x[1]]; visible=[x for x in opts.bundles if not x[1]]
     entries=collect_visible_bundles([p for p,_ in visible],lambda *a:vlog(opts,*a)) if visible else []
     shell,b,conv=build_packed(opts,html,len(raw),os.path.basename(out_name),entries,file)
+    extra_in=sum(len(e['data']) for e in entries)
     # Attach hidden bundle after shell has been built, preserving its own password boundary.
     if hidden:
-        if not opts.bundle_password: opts.bundle_password=prompt_password('Hidden bundle password: ',confirm=True)
-        hentries=collect_hidden_bundles([p for p,_ in hidden]); hi=hidden_envelope(hentries,opts.bundle_password,opts.algo)
-        block=f'<script type="text/plain" id="__hid" '+" ".join(f'{k}="{escape_attr(str(v))}"' for k,v in hi.items() if k!='data')+'>'+z85_script_safe(hi['data'])+'</script>'
+        block,hidden_bytes=_hidden_bundle_block(opts,[p for p,_ in hidden]); extra_in+=hidden_bytes
         shell=shell.replace('</body></html>',block+'</body></html>')
     write_text(out_name,shell)
-    return {'file':file,'out':out_name,'status':'ok','inSize':len(raw),'outSize':len(shell.encode()),'stats':b.stats,'conversion':conv}
+    return {'file':file,'out':out_name,'status':'ok','inSize':len(raw)+extra_in,'outSize':len(shell.encode()),'stats':b.stats,'conversion':conv}
 
 
 def build_merge(dir_path,opts,prompter):
@@ -2285,64 +3210,126 @@ def build_merge(dir_path,opts,prompter):
     if not confirm_overwrite(out_name,opts.force): return {'file':dir_path,'out':out_name,'status':'skip-no-overwrite'}
     visible=[p for p,h in opts.bundles if not h]; entries=collect_visible_bundles(visible,lambda *a:vlog(opts,*a)) if visible else []
     shell,b,g=merge_directory(dir_path,opts,out_name,entries)
-    hidden=[p for p,h in opts.bundles if h]
+    hidden=[p for p,h in opts.bundles if h]; hidden_bytes=0
     if hidden:
-        if not opts.bundle_password: opts.bundle_password=prompt_password('Hidden bundle password: ',confirm=True)
-        hi=hidden_envelope(collect_hidden_bundles(hidden),opts.bundle_password,opts.algo)
-        block=f'<script type="text/plain" id="__hid" '+" ".join(f'{k}="{escape_attr(str(v))}"' for k,v in hi.items() if k!='data')+'>'+z85_script_safe(hi['data'])+'</script>'
+        block,hidden_bytes=_hidden_bundle_block(opts,hidden)
         shell=shell.replace('</body></html>',block+'</body></html>')
     write_text(out_name,shell)
-    source=sum(len(n.data) for n in g.nodes if n.path and os.path.isfile(n.path))
+    source=g.source_bytes()+hidden_bytes
     return {'file':dir_path,'out':out_name,'status':'ok','inSize':source or os.path.getsize(os.path.join(root,'index.html')),'outSize':len(shell.encode()),'stats':b.stats,'merge':g}
+
+
+def _check_overwrite(dest, rel_paths, opts):
+    """Refuse to silently replace existing files when extracting."""
+    existing=[p for p in rel_paths if os.path.exists(os.path.join(dest,p.replace('/',os.sep)))]
+    if not existing or opts.force:
+        return
+    msg=f"{len(existing)} file(s) already exist in {dest} (e.g. {existing[0]})."
+    if not sys.stdin.isatty():
+        raise RuntimeError(msg+" Use -f to overwrite them, or -O to extract into a different folder.")
+    ans=input(msg+" Overwrite? [y/N] ").strip().lower()
+    if ans not in ('y','yes'):
+        raise RuntimeError("extraction cancelled; nothing was written. Use -O to extract into a different folder.")
+
+
+def _print_extracted(result, dest, opts):
+    files=result['files']
+    limit=len(files) if opts.verbose else 15
+    for name,size in files[:limit]:
+        out(f"  {C['dim']}{size_str(size).rjust(9)}{C['reset']}  {name}")
+    if len(files)>limit:
+        out(f"  {C['dim']}… and {len(files)-limit} more (use -v to list all){C['reset']}")
+    out(f"Extracted {result['count']} file{'s' if result['count']!=1 else ''} to {dest}")
+
+
+_PACK_ONLY_NOTE = {"-c":"compression","--compression":"compression","-E":"encryption","--encrypt":"encryption","-b":"bundles","--bundle":"bundles",
+                   "-m":"minify","--minify":"minify","--strip-metadata":"metadata stripping","--base-href":"--base-href",
+                   "--ignore-uris":"--ignore-uris","--skip-unused":"--skip-unused"}
+
+
+def _check_inputs_for_reading(opts, verb):
+    for f in opts.inputs:
+        if os.path.isdir(f):
+            raise UsageError(f"'{f}' is a folder. {verb} works on a packed .html file. To pack a folder, use: arcager -M {f}")
+        if not os.path.isfile(f):
+            raise UsageError(f"cannot find '{f}' (current folder: {os.getcwd()}). Check the spelling or give the full path.")
 
 
 def main(argv=None):
     opts=parse_cli(sys.argv[1:] if argv is None else argv)
-    modes=sum(bool(x) for x in (opts.list_mode,opts.extract_mode,opts.unpack,opts.merge))
-    if modes>1: raise RuntimeError('list, extract, unpack and merge modes are mutually exclusive')
-    if opts.merge and opts.inputs: raise RuntimeError('--merge takes a directory and no positional inputs')
-    if (opts.list_mode or opts.extract_mode) and not opts.inputs: raise RuntimeError('no input files')
-    if not opts.inputs and not opts.merge: raise RuntimeError('no input files')
-    if opts.output and len(opts.inputs)>1: raise RuntimeError('-o is only allowed with one input')
-    if opts.algo==2 and not HAS_BROTLI and not opts.unpack and not opts.list_mode and not opts.extract_mode: raise RuntimeError('Brotli requires the optional brotli package; use the same Python interpreter that runs Arcager: ' + sys.executable)
-    if opts.encrypt:
-        status=cryptography_status()
-        if not status.get('available'):
-            raise RuntimeError(status['error'])
-    if opts.minify and shutil.which("terser") is None: warn('--minify requested but Terser was not found; runtime JavaScript is left unchanged. Install Terser to enable JS minification.')
-    if opts.minify_lossy: warn('--minify lossy modifies the HTML payload and is not byte-preserving')
-    if opts.lossy: warn('lossy mode permits representation-changing media optimization; it does not imply metadata stripping')
-    if opts.strip_metadata: warn('--strip-metadata explicitly permits non-essential metadata cleanup; rendering-critical metadata is preserved')
+    ensure_core_dependencies()
+    modes=[n for n,v in (('-l',opts.list_mode),('-x',opts.extract_mode),('-u',opts.unpack),('-M',bool(opts.merge))) if v]
+    if len(modes)>1: raise UsageError(f"{' and '.join(modes)} cannot be used together; choose one per run (for example run -l first, then -x).")
+    reading = bool(opts.list_mode or opts.extract_mode or opts.unpack)
+    if opts.merge and opts.inputs: raise UsageError(f"-M takes exactly one folder, but extra argument(s) were given: {', '.join(opts.inputs)}. "
+                                                    f"To add extra files to the package use -b PATH.")
+    if not opts.inputs and not opts.merge:
+        raise UsageError("no input given. Examples:\n  arcager page.html          pack a page\n  arcager -M ./site          pack a site folder\n  arcager -l packed.html     list a package\n  Run 'arcager --help' for everything.")
+    if opts.output and len(opts.inputs)>1: raise UsageError(f"-o names ONE output file, but {len(opts.inputs)} inputs were given. Use -O FOLDER to choose where the outputs go.")
+    if opts.output and (opts.list_mode or opts.extract_mode): raise UsageError("-o does not apply to -l/-x. To choose where extracted files go, use -O FOLDER.")
+    if opts.algo==2 and not HAS_BROTLI and not reading:
+        raise RuntimeError(f"Brotli needs the optional 'brotli' package, which this Python does not have. Install it with:\n  {sys.executable} -m pip install brotli\nor use the default (-c gzip).")
+    if reading and opts.seen_pack_options:
+        names=sorted({_PACK_ONLY_NOTE[x] for x in opts.seen_pack_options if x in _PACK_ONLY_NOTE})
+        if names: warn(f"{', '.join(names)} only apply when packing and were ignored.")
+    if not reading:
+        if opts.skip_unused and not opts.merge:
+            warn("--skip-unused only applies together with -M (merge a folder), so it was ignored.")
+        if opts.password and not opts.encrypt:
+            warn("--password was given without -E, so the package will NOT be encrypted. Add -E to encrypt it.")
+        if opts.bundle_password and not any(h for _,h in opts.bundles):
+            warn("--bundle-password was given but there is no hidden bundle; add -b PATH hidden to create one.")
+        if (opts.lossy or opts.strip_metadata) and not HAS_PIL:
+            what=" and ".join(x for x,on in (("lossy",opts.lossy),("--strip-metadata",opts.strip_metadata)) if on)
+            warn(f"{what} {'need' if (opts.lossy and opts.strip_metadata) else 'needs'} Pillow, which is not installed, so images are kept exactly as they are. "
+                 f"Install it with: {sys.executable} -m pip install Pillow")
+        if opts.minify and shutil.which("terser") is None:
+            warn("--minify needs Terser, which was not found, so the loader script is left unminified. Install it with: npm install -g terser")
+    if (opts.list_mode or opts.extract_mode): _check_inputs_for_reading(opts, '-l' if opts.list_mode else '-x')
 
     if opts.list_mode:
         for f in opts.inputs:
             sig=read_signature(f)
             if sig==4: list_packed(f,opts)
-            elif sig==3: raise RuntimeError(f'{f}: v3 package detected; 4.0 is v4-only')
+            elif sig is not None and sig<4: raise RuntimeError(f'{f}: this is an Arcager {sig}.x package (v{sig}); Arcager 4 reads only v4 packages. Re-pack the original sources with Arcager 4.')
+            elif sig is not None: raise RuntimeError(f'{f}: written by a newer Arcager (package v{sig}); update Arcager to read it.')
             else: list_unpacked(f,opts)
         return
     if opts.extract_mode:
-        dest=opts.output_dir or './extracted'; os.makedirs(dest,exist_ok=True)
+        base_dest=opts.output_dir or './extracted'
         total=0
         for f in opts.inputs:
             sig=read_signature(f)
-            if sig==4: total+=extract_packed(f,opts,dest)
-            elif sig==3: raise RuntimeError(f'{f}: v3 package detected; 4.0 is v4-only')
-            else: total+=extract_unpacked(f,opts,dest)
-        out(f"Extracted {total} item(s) to {dest}"); return
+            dest=os.path.join(base_dest,re.sub(r'\.html?$','',os.path.basename(f),flags=re.I)) if len(opts.inputs)>1 else base_dest
+            if sig==4:
+                result=extract_packed(f,opts,dest)
+            elif sig is not None and sig<4: raise RuntimeError(f'{f}: this is an Arcager {sig}.x package (v{sig}); Arcager 4 reads only v4 packages. Re-pack the original sources with Arcager 4.')
+            elif sig is not None: raise RuntimeError(f'{f}: written by a newer Arcager (package v{sig}); update Arcager to read it.')
+            else:
+                result=extract_unpacked(f,opts,dest)
+            total+=result['count']
+            if result['count']: _print_extracted(result,dest,opts)
+        if not total: raise SystemExit(3)
+        return
 
     files=[]
-    if opts.merge: files=[opts.merge]
+    if opts.merge:
+        if not os.path.isdir(opts.merge):
+            raise UsageError(f"-M needs a folder, but '{opts.merge}' is {'a file' if os.path.isfile(opts.merge) else 'not found'}. "
+                             f"{'To pack a single page, run: arcager '+opts.merge if os.path.isfile(opts.merge) else 'Check the spelling or give the full path.'}")
+        files=[opts.merge]
     else:
         for p in opts.inputs:
             if os.path.isdir(p):
-                fs,_=scan_dir(p,opts.recursive); files.extend(fs)
+                fs,_=scan_dir(p,opts.recursive)
+                if not fs: warn(f"no .html files found in '{p}'{'' if opts.recursive else ' (add -r to search subfolders, or use -M to pack it as a site)'}.")
+                files.extend(fs)
             elif os.path.isfile(p): files.append(p)
-            else: warn(f'no such input: {p}')
+            else: warn(f"cannot find '{p}' (current folder: {os.getcwd()}); skipping it. Check the spelling or give the full path.")
     # deterministic de-dup of batch inputs
     seen=set(); files=[f for f in files if not (os.path.realpath(f) in seen or seen.add(os.path.realpath(f)))]
-    if not files: raise RuntimeError('no input files to process')
-    results=[]; t=time.time()
+    if not files: raise UsageError('nothing to process: no usable input files were found.')
+    results=[]; t=time.time(); mode='unpack' if opts.unpack else 'pack'
     for i,f in enumerate(files,1):
         try:
             if opts.merge: r=build_merge(f,opts,None)
@@ -2351,19 +3338,27 @@ def main(argv=None):
                 if sig!=4: r={'file':f,'status':'skip-not-packed' if sig is None else 'skip-unknown-version'}
                 else:
                     stem=os.path.basename(f); core=stem[len(opts.prefix):] if opts.prefix and stem.startswith(opts.prefix) else (stem[len(_DEFAULT_PACK_PREFIX):] if stem.startswith(_DEFAULT_PACK_PREFIX) else stem)
-                    out_name=output_path(opts,_DEFAULT_UNPACK_PREFIX+core,os.path.dirname(f));
+                    out_name=output_path(opts,_DEFAULT_UNPACK_PREFIX+core,os.path.dirname(f))
+                    if os.path.abspath(out_name)==os.path.abspath(f): raise RuntimeError(f'the output would overwrite the package itself ({f}). Choose another name with -o or another folder with -O.')
                     if not confirm_overwrite(out_name,opts.force): r={'file':f,'out':out_name,'status':'skip-no-overwrite'}
                     else:
                         rr=unpack_packed(f,opts,out_name); r={'file':f,'out':out_name,'status':'ok',**rr}
             else: r=build_single_file(f,opts,None,[])
+        except SystemExit: raise
         except Exception as e:
             r={'file':f,'status':'error','error':str(e)}
-        results.append(r); usage_status(r,i,len(files))
+        results.append(r); usage_status(r,i,len(files),mode)
     ok=[r for r in results if r['status']=='ok']; failed=[r for r in results if r['status']=='error']; skipped=[r for r in results if r['status'].startswith('skip')]
     out(''); out(f"Summary: {len(ok)} processed · {len(skipped)} skipped · {len(failed)} failed · {time.time()-t:.2f}s")
+    if len(ok)>1:
+        tb=sum(r['inSize'] for r in ok); ta=sum(r['outSize'] for r in ok)
+        out(f"  total: {size_str(tb)} → {size_str(ta)}  ({ratio_str(tb,ta)})")
     for r in ok:
         if r.get('stats'):
-            s=r['stats']; out(f"  logical {s['logical'] or '-'} · physical {s['physical'] or '-'} · streams {s['streams']} · stored {size_str(s['stored_bytes'])} from {size_str(s['raw_bytes'])} · duplicates {s['duplicate_count']}")
+            s=r['stats']
+            dup=f" · {s['duplicate_count']} duplicate{'s' if s['duplicate_count']!=1 else ''} stored once (saved {size_str(s['duplicate_bytes'])})" if s['duplicate_count'] else ""
+            out(f"  {s['logical'] or '-'} resource{'s' if s['logical']!=1 else ''} ({s['physical'] or '-'} distinct) in {s['streams']} stream{'s' if s['streams']!=1 else ''} · "
+                f"payload {size_str(s['stored_bytes'])} from {size_str(s['raw_bytes'])} ({percent_of(s['stored_bytes'],s['raw_bytes'])} of raw){dup}")
             if opts.verbose and s.get('solid_attempts'):
                 for a in s['solid_attempts']:
                     algo_name = {1: 'GZIP', 2: 'Brotli'}.get(a['algorithm'], 'stored')
@@ -2372,10 +3367,15 @@ def main(argv=None):
                     delta_text = size_str(saved) if saved >= 0 else f"-{size_str(-saved)}"
                     reason = a.get('decision_reason')
                     suffix = f" ({reason})" if reason and reason not in ('accepted', 'stored: candidate not smaller') else ''
-                    out(f"  solid: {a['mime']} · {algo_name} {size_str(a['raw_bytes'])} → {size_str(a['candidate_bytes'])} · {delta_text} · {verdict}{suffix}")
-        if r.get('merge') and r['merge'].external: out(f"  external resource dependencies: {len(r['merge'].external)}")
+                    out(f"  solid: {a['mime']} · {algo_name} {size_str(a['raw_bytes'])} → {size_str(a['candidate_bytes'])} ({percent_of(a['candidate_bytes'],a['raw_bytes'])}) · {delta_text} · {verdict}{suffix}")
+        if r.get('merge') and r['merge'].external:
+            ext=sorted(r['merge'].external)
+            out(f"  external resource dependencies: {len(ext)} (still loaded from the network when the page opens)")
         if r.get('conversion') and opts.verbose:
             for row in r['conversion']: print(f"  conversion: {row}",file=sys.stderr)
+    if mode=='pack' and any(r['outSize']>r['inSize'] for r in ok):
+        hint=" For the smallest result try -c brotli." if opts.algo==1 else ""
+        out(f"  note: some packages are larger than their source. Already-compressed content (JPEG, PNG, video, WOFF2) cannot shrink, and the self-unpacking wrapper adds a little overhead.{hint}")
     if failed:
         for r in failed: err(f"{r['file']}: {r['error']}")
         raise SystemExit(2)
@@ -2385,6 +3385,12 @@ def main(argv=None):
 if __name__=='__main__':
     try: main()
     except KeyboardInterrupt: raise SystemExit(130)
+    except BrokenPipeError:
+        try: sys.stdout = open(os.devnull, "w")     # reader (e.g. `| head`) went away: not an error
+        except Exception: pass
+        raise SystemExit(0)
     except SystemExit: raise
+    except UsageError as e:
+        err(str(e)); print("  Run 'arcager --help' for usage.",file=sys.stderr); raise SystemExit(1)
     except Exception as e:
         err(str(e)); raise SystemExit(1)

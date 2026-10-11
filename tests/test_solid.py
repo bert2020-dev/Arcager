@@ -98,8 +98,10 @@ def test_preservation_merge_dedup_and_unpack(tmp_path):
     assert r.returncode == 0, r.stderr
     text = unpacked.read_text(encoding="utf-8")
     assert "arcager-res:" not in text
-    assert "data:image/svg+xml;base64," in text
-    assert "data:text/css;base64," in text
+    assert "data:image/svg+xml;base64," in text      # binary-ish media stays embedded
+    assert "data:text/css;base64," not in text       # CSS comes back as readable text...
+    assert "<style>" in text and "background:url(" in text   # ...inside a real <style> element
+    assert "<script>" in text and "arcager-test" in text      # and JS inside a real <script>
 
 
 
@@ -486,3 +488,10 @@ def test_non_beneficial_solid_candidate_is_rejected():
     assert len(parsed["streams"]) == 1
     assert parsed["streams"][0]["algo"] == 0
     assert parsed["streams"][0]["raw_size"] == len(data)
+
+
+if __name__ == "__main__":
+    # Running this file directly used to print nothing at all (it only defines tests).
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+    from run_tests import main as _run_tests
+    raise SystemExit(_run_tests([str(Path(__file__).resolve())]))

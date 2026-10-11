@@ -1,0 +1,2 @@
+# Core requirement: encryption is built into Arcager.
+cryptography

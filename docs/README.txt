@@ -1,4 +1,4 @@
-Arcager 4.0 documentation
+Arcager 4.2 documentation
 ==========================
 
 The public entry point is ../README.md.
