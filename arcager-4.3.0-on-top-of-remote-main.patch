@@ -1,0 +1,1059 @@
+diff --git a/.gitattributes b/.gitattributes
+new file mode 100644
+index 0000000..1c03ce2
+--- /dev/null
++++ b/.gitattributes
+@@ -0,0 +1,7 @@
++# Keep line endings identical on every machine (Windows included).
++* text=auto eol=lf
++
++# Benchmark fixtures are byte-exact test data whose SHA-256 digests are verified.
++# Never convert or normalize them: this stops Windows "autocrlf" from silently
++# changing the bytes and failing every digest check.
++benchmarks/fixtures/** -text
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index b620e54..1c35028 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -1,5 +1,36 @@
+ # Changelog
+ 
++## 4.3.0
++
++### Changed
++- **Every Python feature works after one install step.** `brotli` and `Pillow` join `cryptography`
++  in `requirements.txt`; `requirements-optional.txt` is gone. Fallbacks and clear errors remain,
++  but nobody should hit a surprise second `pip install` after the first one.
++- **`--minify` needs no Terser.** The minified loader now ships inside `arcager.py` (about 4.5 KB
++  smaller per package) and is verified to match the loader source. Terser is only needed by
++  maintainers who edit the loader (`scripts/build_runtime.py`). `-V` still reports whether Terser
++  is installed and which version, and now says it is not needed for `--minify`.
++- **Plain packages are smaller again.** Only encrypted packages carry the password form, its CSS
++  and the decryption code. A plain package is about 80 bytes *smaller* than with the original 4.0
++  loader even with the dark theme, the better CSV parser and the forgiving `getImage`; in 4.2.0
++  every package paid roughly 2.5 KB for the password UI.
++- The loader CSS and the `<noscript>` notice were tightened.
++
++### Added
++- **`arcager --install-deps`** installs whichever of `cryptography`, `brotli` and `Pillow` is
++  missing into the Python that runs Arcager (and only when you ask). If pip refuses it explains
++  why: an OS-managed Python (virtual-environment commands), no network, or no pip.
++- `scripts/build_runtime.py` (maintainers: rebuild the embedded minified loader; `--check` mode).
++- `.gitattributes`: LF everywhere, and `benchmarks/fixtures/**` marked `-text`. On Windows with
++  `autocrlf=true` the fixtures were being converted to CRLF, which failed all 25 digest checks.
++- Tests for conditional loader code, `--minify` without Terser, the freshness and validity of the
++  embedded loader, `--install-deps` guidance and `.gitattributes`.
++
++### Documentation
++- Installation sections rewritten around the single install step; `docs/README.txt` no longer
++  claims the implementation is dependency-free; architecture and testing notes updated.
++- `docs/TESTING.md` explains line endings, the fixtures, and what to run after editing the loader.
++
+ ## 4.2.0
+ 
+ ### Changed
+diff --git a/README.md b/README.md
+index a9f6552..4e30fe0 100644
+--- a/README.md
++++ b/README.md
+@@ -1,4 +1,4 @@
+- # Arcager 4.2
++ # Arcager 4.3
+ 
+ **One HTML file. A real packaging layer behind it.**
+ 
+@@ -10,7 +10,7 @@ Arcager 4.x is the **Solid Update**: more capable than 3.x, but deliberately sim
+ 
+ [![License](https://img.shields.io/badge/license-see%20LICENSE.txt-blue.svg)](LICENSE.txt)
+ [![Python](https://img.shields.io/badge/python-3.8%2B-blue.svg)](https://www.python.org/)
+-[![Core dependencies](https://img.shields.io/badge/core%20dependency-cryptography-brightgreen.svg)](#installation)
++[![Install](https://img.shields.io/badge/install-one%20requirements.txt-brightgreen.svg)](#installation)
+ [![Platforms](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey.svg)](#cross-platform)
+ 
+ ## Why use Arcager?
+@@ -28,7 +28,7 @@ That is useful for:
+ 
+ ### What 4.x brings together
+ 
+-| Goal | Arcager 4.2 |
++| Goal | Arcager 4.3 |
+ |---|---|
+ | **One-file distribution** | Static sites become self-unpacking HTML. |
+ | **Preservation** | Original representations are kept by default. |
+@@ -47,7 +47,7 @@ The core philosophy is simple:
+ 
+ ## Quick start
+ 
+-Once the one required package is installed (`python -m pip install -r requirements.txt`, see [Installation](#installation)), the normal preservation path needs nothing else:
++After a one-time `python -m pip install -r requirements.txt` (see [Installation](#installation)), every command below works:
+ 
+ ```bash
+ # Pack one HTML document; GZIP is the default.
+@@ -285,29 +285,41 @@ Details, examples and troubleshooting: [`docs/CLI.md`](docs/CLI.md).
+ 
+ ## Installation
+ 
+-You need Python **3.8+** and one package, `cryptography`, because encryption (`-E`, hidden bundles) is a core part of Arcager and not an add-on. Everything else is optional.
++You need Python **3.8+** and three Python packages. Every feature of Arcager works as soon as they are installed; there is no second install step later.
+ 
+ ```bash
+-python -m pip install -r requirements.txt            # required: cryptography
+-python -m pip install -r requirements-optional.txt   # optional: Brotli, Pillow
+-npm install -g terser                                # optional: JavaScript minification
+-python arcager.py -V                                 # shows what Arcager found
++python -m pip install -r requirements.txt     # cryptography, brotli, Pillow
++python arcager.py -V                          # shows what was found
+ ```
+ 
+-`python arcager.py -V` prints the Arcager version and, for each component, whether it is available and which version, including **Terser**:
++Or let Arcager do it for you. This installs whatever is missing into the Python that runs Arcager, and tells you what to do if pip refuses (for example on an operating-system-managed Python):
++
++```bash
++python arcager.py --install-deps
++```
++
++| Package | Used for |
++|---|---|
++| `cryptography` | encryption: `-E`, hidden bundles (required: Arcager will not start without it) |
++| `brotli` | `-c brotli` |
++| `Pillow` | `lossy` conversion and `--strip-metadata` |
++
++`--minify` needs nothing extra: the minified loader is built into `arcager.py`. **Terser** (an npm tool) is only for maintainers who edit the loader, and `-V` still reports whether it is installed and which version.
++
++`python arcager.py -V` prints the Arcager version and what it found:
+ 
+ ```text
+-arcager 4.2.0
++arcager 4.3.0
+   Python        3.12.3  (/usr/bin/python3)
+   cryptography  46.0.6  (required, encryption)
+-  Terser        5.51.2  (/usr/local/bin/terser)
+-  Brotli        1.2.0  (optional, for -c brotli)
+-  Pillow        12.1.1  (optional, for lossy / --strip-metadata)
++  Terser        5.51.2  (/usr/local/bin/terser)  (only needed to rebuild the built-in loader: scripts/build_runtime.py)
++  Brotli        1.2.0  (for -c brotli)
++  Pillow        12.1.1  (for lossy / --strip-metadata)
+ ```
+ 
+-If `cryptography` is missing Arcager stops immediately and prints the exact install command for the Python it is running under. Missing optional components never block normal packing: Arcager tells you which feature needs which component and how to install it.
++If `cryptography` is missing Arcager stops immediately and prints the exact install command. If Brotli or Pillow is missing, packing without them still works; using `-c brotli` or `lossy` tells you what to run. Nothing is ever installed unless you ask (`--install-deps`).
+ 
+-For a more detailed diagnostic (every module path, Node.js, Terser) run `python scripts/doctor.py`. It is especially useful on Windows, where the Microsoft Store `python.exe` alias, another Python installation, and an activated virtual environment can be different interpreters. Arcager never installs packages by itself.
++For a more detailed diagnostic (every module path, Node.js, Terser) run `python scripts/doctor.py`. It is especially useful on Windows, where the Microsoft Store `python.exe` alias, another Python installation, and an activated virtual environment can be different interpreters.
+ 
+ ## Cross-platform
+ 
+diff --git a/arcager.py b/arcager.py
+index e524dbe..ce55f4e 100644
+--- a/arcager.py
++++ b/arcager.py
+@@ -58,7 +58,7 @@ except ImportError:
+ _AESGCM = None
+ _CRYPTOGRAPHY_ERROR = None
+ 
+-VERSION = "4.2.0"   # <- the ONE place to change the version; then run scripts/sync_docs.py
++VERSION = "4.3.0"   # <- the ONE place to change the version; then run scripts/sync_docs.py
+ __version__ = VERSION
+ SIGNATURE = "<!--arcager:4-->"
+ SIG_RE = re.compile(r"^<!--arcager:(\d+)-->")
+@@ -360,6 +360,62 @@ def cryptography_status():
+         return {"available": False, "version": None, "interpreter": sys.executable, "error": str(exc)}
+ 
+ 
++# (import name, pip package, what it is for). All three come from requirements.txt.
++_PYTHON_COMPONENTS = (
++    ("cryptography", "cryptography", "encryption (-E, hidden bundles)"),
++    ("brotli", "brotli", "-c brotli"),
++    ("PIL", "Pillow", "lossy and --strip-metadata"),
++)
++
++
++def _importable(module: str) -> bool:
++    try:
++        r = subprocess.run([sys.executable, "-c", f"import {module}"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
++        return r.returncode == 0
++    except Exception:
++        return False
++
++
++def install_dependencies() -> int:
++    """--install-deps: pip-install whatever Arcager needs that this Python is missing."""
++    missing = [(m, pkg, why) for m, pkg, why in _PYTHON_COMPONENTS if not _importable(m)]
++    if not missing:
++        print("Everything Arcager needs is already installed. (arcager -V shows the details.)")
++        return 0
++    names = [pkg for _, pkg, _ in missing]
++    print(f"Installing {', '.join(names)} into {sys.executable} …")
++    for _, pkg, why in missing:
++        print(f"  {pkg}: for {why}")
++    try:
++        r = subprocess.run([sys.executable, "-m", "pip", "install", *names], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
++    except OSError as exc:
++        err(f"could not run pip with {sys.executable}: {exc}")
++        return 1
++    output = r.stdout or ""
++    if r.returncode != 0:
++        tail = "\n".join(output.strip().splitlines()[-6:])
++        err("pip could not install the packages.\n" + tail)
++        exe = sys.executable
++        if "externally-managed-environment" in output:
++            print("\nThis Python belongs to your operating system, so pip refuses to change it. Use a virtual environment instead:\n"
++                  "  python3 -m venv .venv\n"
++                  "  .venv/bin/python -m pip install -r requirements.txt        (Windows: .venv\\Scripts\\python -m pip install -r requirements.txt)\n"
++                  "then run Arcager with that Python:  .venv/bin/python arcager.py ...", file=sys.stderr)
++        elif "No module named pip" in output:
++            print(f"\npip is not installed for this Python. Run:  {exe} -m ensurepip --upgrade   and try again.", file=sys.stderr)
++        elif re.search(r"(?i)connection|network|resolution|timed out|Could not find a version|No matching distribution", output):
++            print("\npip could not reach the package index. Check your internet connection (or proxy settings) and try again.", file=sys.stderr)
++        else:
++            print(f"\nTry the same command by hand to see the full output:  {exe} -m pip install {' '.join(names)}", file=sys.stderr)
++        return 1
++    still = [pkg for m, pkg, _ in missing if not _importable(m)]
++    if still:
++        err(f"pip finished, but this Python still cannot import: {', '.join(still)}. Run arcager -V to see the interpreter in use.")
++        return 1
++    print(f"Done. Installed: {', '.join(names)}.")
++    return 0
++
++
+ def ensure_core_dependencies():
+     """Encryption is a core feature, so its library is a requirement, not an extra."""
+     status = cryptography_status()
+@@ -368,9 +424,9 @@ def ensure_core_dependencies():
+         raise RuntimeError(
+             "Arcager needs the 'cryptography' package (it provides the encryption that is built into Arcager), "
+             f"but this Python cannot use it ({exe}).\n"
+-            f"  Install it with:  {exe} -m pip install -r requirements.txt\n"
+-            f"  (or just:         {exe} -m pip install cryptography)\n"
+-            f"  Reason: {status.get('error', 'unknown')}")
++            f"  Install everything Arcager needs in one step:  {exe} arcager.py --install-deps\n"
++            f"  (or by hand:  {exe} -m pip install -r requirements.txt)\n"
++            f"  Reason: {str(status.get('error', 'unknown')).split(' Install')[0].strip()}")
+ 
+ 
+ def terser_info():
+@@ -394,18 +450,18 @@ def version_text() -> str:
+     rows = [f"arcager {VERSION}", f"  Python        {sys.version.split()[0]}  ({sys.executable})"]
+     crypto = cryptography_status()
+     rows.append("  cryptography  " + (f"{crypto['version']}  (required, encryption)" if crypto.get("available")
+-                else "NOT AVAILABLE  (required: python -m pip install -r requirements.txt)"))
++                else "NOT AVAILABLE  (required: arcager --install-deps)"))
+     path, ver, problem = terser_info()
+     if path is None:
+-        rows.append("  Terser        not installed  (optional, for --minify: npm install -g terser)")
++        rows.append("  Terser        not installed  (not needed: --minify uses the loader built into Arcager)")
+     elif ver:
+-        rows.append(f"  Terser        {ver}  ({path})")
++        rows.append(f"  Terser        {ver}  ({path})  (only needed to rebuild the built-in loader: scripts/build_runtime.py)")
+     else:
+-        rows.append(f"  Terser        found at {path} but {problem}  (--minify will leave the loader unminified)")
+-    rows.append("  Brotli        " + (f"{getattr(_brotli, '__version__', 'installed')}  (optional, for -c brotli)" if HAS_BROTLI
+-                else "not installed  (optional, for -c brotli: python -m pip install brotli)"))
+-    rows.append("  Pillow        " + (f"{getattr(sys.modules.get('PIL'), '__version__', 'installed')}  (optional, for lossy / --strip-metadata)" if HAS_PIL
+-                else "not installed  (optional, for lossy / --strip-metadata: python -m pip install Pillow)"))
++        rows.append(f"  Terser        found at {path} but {problem}  (not needed for --minify)")
++    rows.append("  Brotli        " + (f"{getattr(_brotli, '__version__', 'installed')}  (for -c brotli)" if HAS_BROTLI
++                else "NOT INSTALLED  (needed for -c brotli: arcager --install-deps)"))
++    rows.append("  Pillow        " + (f"{getattr(sys.modules.get('PIL'), '__version__', 'installed')}  (for lossy / --strip-metadata)" if HAS_PIL
++                else "NOT INSTALLED  (needed for lossy / --strip-metadata: arcager --install-deps)"))
+     return "\n".join(rows)
+ 
+ 
+@@ -1797,21 +1853,21 @@ class MergeGraph:
+ LOADER_CSS = (
+     "[hidden]{display:none!important}"
+     "html{color-scheme:dark;background:#0f1115}"
+-    "body{margin:0;background:#0f1115;color:#e6e8ec;font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}"
+-    "#__pnl{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;padding:16px;box-sizing:border-box;background:#0f1115;z-index:2147483647}"
+-    "#__box{box-sizing:border-box;width:100%;max-width:420px;padding:26px 28px;border:1px solid #262b36;border-radius:14px;background:#171a21;box-shadow:0 18px 48px rgba(0,0,0,.55)}"
+-    "#__brand{font-size:11px;letter-spacing:.22em;color:#6f7a90;margin-bottom:10px}"
+-    "#__lbl{font-size:16px;line-height:1.4;color:#e6e8ec}"
++    "body{margin:0;background:#0f1115;color:#e6e8ec;font:16px system-ui,sans-serif}"
++    "#__pnl{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;padding:16px;background:#0f1115}"
++    "#__box{box-sizing:border-box;width:100%;max-width:420px;padding:26px 28px;border:1px solid #262b36;border-radius:14px;background:#171a21}"
++    "#__brand{font-size:11px;letter-spacing:.2em;color:#6f7a90;margin-bottom:10px}"
+     "#__bar{margin-top:16px;height:6px;background:#262b36;border-radius:6px;overflow:hidden}"
+-    "#__fill{width:2%;height:100%;border-radius:6px;background:linear-gradient(90deg,#6ea8ff,#8f7dff);transition:width .15s linear}"
++    "#__fill{width:2%;height:100%;background:linear-gradient(90deg,#6ea8ff,#8f7dff);transition:width .15s linear}"
++    "#__err{margin-top:12px;font-size:14px;color:#ff9a9a;white-space:pre-wrap;word-break:break-word}"
++    "#__err:empty{display:none}"
++)
++# Only added to encrypted packages (the in-page password form).
++LOADER_CSS_PW = (
+     "#__pwf{display:flex;gap:8px;margin-top:16px}"
+-    "#__pw{flex:1;min-width:0;padding:10px 12px;font:inherit;color:#e6e8ec;background:#0f1115;border:1px solid #343b4a;border-radius:8px;outline:none}"
+-    "#__pw:focus{border-color:#6ea8ff;box-shadow:0 0 0 3px rgba(110,168,255,.22)}"
++    "#__pw{flex:1;min-width:0;padding:10px;font:inherit;color:inherit;background:#0f1115;border:1px solid #343b4a;border-radius:8px;outline:0}"
++    "#__pw:focus{border-color:#6ea8ff}"
+     "#__pwf button{padding:10px 16px;font:inherit;font-weight:600;color:#0b1020;background:#6ea8ff;border:0;border-radius:8px;cursor:pointer}"
+-    "#__pwf button:hover{background:#8dbbff}"
+-    "#__err{margin-top:12px;font-size:14px;line-height:1.45;color:#ff9a9a;white-space:pre-wrap;word-break:break-word}"
+-    "#__err:empty{display:none}"
+-    "@media (prefers-reduced-motion:reduce){#__fill{transition:none}}"
+ )
+ 
+ # ---------- container shell ----------
+@@ -1829,14 +1885,14 @@ function varint(a,p){var v=0,m=1,b;do{if(p>=a.length)throw Error("truncated Arca
+ function u32(a,p){return (((a[p])|(a[p+1]<<8)|(a[p+2]<<16)|(a[p+3]<<24))>>>0);}
+ function u64(a,p){var v=u32(a,p)+u32(a,p+4)*4294967296;if(v>Number.MAX_SAFE_INTEGER)throw Error('v4 payload is too large for this browser runtime');return v;}
+ function fail(e){var x=e&&e.message?e.message:String(e);window.arcager.error=e instanceof Error?e:new Error(x);var pf=document.getElementById("__pwf");if(pf)pf.hidden=true;if(ER)ER.textContent=x;if(L)L.textContent="Failed to unpack";if(P)P.hidden=false;if(window.console)console.error(e);readyReject(window.arcager.error);}
+-function askPassword(note){return new Promise(function(res,rej){var f=document.getElementById("__pwf"),i=document.getElementById("__pw"),bar=document.getElementById("__bar");if(!f||!i){var v=prompt("Enter Arcager password:");if(v===null)rej(Error("password entry cancelled"));else res(v);return;}if(L)L.textContent="This page is password protected";if(ER)ER.textContent=note||"";if(bar)bar.hidden=true;f.hidden=false;i.value="";i.focus();f.onsubmit=function(ev){ev.preventDefault();var v=i.value;f.hidden=true;if(ER)ER.textContent="";if(L)L.textContent="Checking password\u2026";res(v);};});}
++/*@ENC*/function askPassword(note){return new Promise(function(res,rej){var f=document.getElementById("__pwf"),i=document.getElementById("__pw"),bar=document.getElementById("__bar");if(!f||!i){var v=prompt("Enter Arcager password:");if(v===null)rej(Error("password entry cancelled"));else res(v);return;}if(L)L.textContent="This page is password protected";if(ER)ER.textContent=note||"";if(bar)bar.hidden=true;f.hidden=false;i.value="";i.focus();f.onsubmit=function(ev){ev.preventDefault();var v=i.value;f.hidden=true;if(ER)ER.textContent="";if(L)L.textContent="Checking password\u2026";res(v);};});}/*@/ENC*/
+ function progress(n){if(F)F.style.width=Math.max(0,Math.min(100,n))+'%';if(L)L.textContent='Unpacking… '+Math.floor(n)+'%';}
+ var M=["application/octet-stream","text/html","application/xhtml+xml","text/css","text/javascript","application/javascript","application/json","application/xml","text/xml","text/plain","text/csv","text/tab-separated-values","image/png","image/jpeg","image/webp","image/gif","image/svg+xml","image/bmp","image/x-icon","image/avif","font/woff","font/woff2","font/ttf","font/otf","application/vnd.ms-fontobject","application/pdf","application/postscript","audio/mpeg","audio/ogg","audio/wav","audio/mp4","audio/aac","audio/flac","audio/opus","video/mp4","video/webm","video/ogg","video/quicktime","text/markdown","application/zip","application/gzip","application/x-7z-compressed"];
+ function crc32(a){var c=~0;for(var i=0;i<a.length;i++){c^=a[i];for(var j=0;j<8;j++)c=(c>>>1)^(0xEDB88320&-(c&1));}return (~c)>>>0;}
+ async function ungzip(a){var ds=new DecompressionStream('gzip'),w=ds.writable.getWriter(),r=ds.readable.getReader();w.write(a);w.close();var ch=[],n=0;while(true){var x=await r.read();if(x.done)break;ch.push(x.value);n+=x.value.length;}var o=new Uint8Array(n),p=0;for(var i=0;i<ch.length;i++){o.set(ch[i],p);p+=ch[i].length;}return o;}
+ async function unbro(a){var ds=new DecompressionStream('brotli'),w=ds.writable.getWriter(),r=ds.readable.getReader();w.write(a);w.close();var ch=[],n=0;while(true){var x=await r.read();if(x.done)break;ch.push(x.value);n+=x.value.length;}var o=new Uint8Array(n),p=0;for(var i=0;i<ch.length;i++){o.set(ch[i],p);p+=ch[i].length;}return o;}
+-async function keyFromPassword(pw,s,it){var e=new TextEncoder(),b=await crypto.subtle.importKey('raw',e.encode(pw),{name:'PBKDF2'},false,['deriveKey']);return crypto.subtle.deriveKey({name:'PBKDF2',salt:b64d(s),iterations:it,hash:'SHA-256'},b,{name:'AES-GCM',length:256},false,['decrypt']);}
+-async function decrypt(k,iv,a){return new Uint8Array(await crypto.subtle.decrypt({name:'AES-GCM',iv:b64d(iv)},k,a));}
++/*@ENC*/async function keyFromPassword(pw,s,it){var e=new TextEncoder(),b=await crypto.subtle.importKey('raw',e.encode(pw),{name:'PBKDF2'},false,['deriveKey']);return crypto.subtle.deriveKey({name:'PBKDF2',salt:b64d(s),iterations:it,hash:'SHA-256'},b,{name:'AES-GCM',length:256},false,['decrypt']);}/*@/ENC*/
++/*@ENC*/async function decrypt(k,iv,a){return new Uint8Array(await crypto.subtle.decrypt({name:'AES-GCM',iv:b64d(iv)},k,a));}/*@/ENC*/
+ function parseContainer(c){
+   if(c.length<64)throw Error('v4 container truncated');
+   var td=new TextDecoder();
+@@ -1945,7 +2001,7 @@ async function main(){
+   if(typeof DecompressionStream==='undefined')throw Error('This browser does not provide DecompressionStream.');
+   if(!E)throw Error('Arcager v4 container block is missing.');
+   var enc=E.getAttribute('data-e')==='1',rawSize=Number(E.getAttribute('data-n')||0),blob=z85d(E.textContent||'',rawSize),key=null;
+-  if(enc){if(!crypto||!crypto.subtle)throw Error('Encrypted Arcager packages require Web Crypto support.');var s=E.getAttribute('data-s'),iv=E.getAttribute('data-iv'),it=Number(E.getAttribute('data-i')),ck=E.getAttribute('data-ck');var note='';while(true){var pw=await askPassword(note);try{var k=await keyFromPassword(pw,s,it);var can=await decrypt(k,E.getAttribute('data-civ'),b64d(ck));if(new TextDecoder().decode(can)!=='arcager-ok')throw Error('bad password');key=k;break;}catch(e){if(window.console)console.warn('Arcager: incorrect password');note='Incorrect password. Please try again.';}}var bar0=document.getElementById('__bar');if(bar0)bar0.hidden=false;if(L)L.textContent='Unpacking\u2026';blob=await decrypt(key,iv,blob);}
++/*@ENC*/  if(enc){if(!crypto||!crypto.subtle)throw Error('Encrypted Arcager packages require Web Crypto support.');var s=E.getAttribute('data-s'),iv=E.getAttribute('data-iv'),it=Number(E.getAttribute('data-i')),ck=E.getAttribute('data-ck');var note='';while(true){var pw=await askPassword(note);try{var k=await keyFromPassword(pw,s,it);var can=await decrypt(k,E.getAttribute('data-civ'),b64d(ck));if(new TextDecoder().decode(can)!=='arcager-ok')throw Error('bad password');key=k;break;}catch(e){if(window.console)console.warn('Arcager: incorrect password');note='Incorrect password. Please try again.';}}var bar0=document.getElementById('__bar');if(bar0)bar0.hidden=false;if(L)L.textContent='Unpacking\u2026';blob=await decrypt(key,iv,blob);}/*@/ENC*/
+   var C=parseContainer(blob),cache=[],need={},nodes=C.logical;
+   for(var i=0;i<C.logical.length;i++)need[C.logical[i].physical]=true;
+   var streamIds={};for(var i=0;i<C.physical.length;i++)streamIds[C.physical[i].stream]=true;
+@@ -1965,6 +2021,48 @@ main().catch(fail);
+ })();'''
+ 
+ 
++_ENC_REGION_RE = re.compile(r"/\*@ENC\*/.*?/\*@/ENC\*/", re.S)
++
++
++def runtime_source(encrypted: bool) -> str:
++    """The loader script for one package.
++
++    The password prompt and the decryption code are only included when the package is
++    encrypted, so a plain package does not carry (or pay bytes for) code it can never run.
++    """
++    if encrypted:
++        return JS_RUNTIME.replace("/*@ENC*/", "").replace("/*@/ENC*/", "")
++    return _ENC_REGION_RE.sub("", JS_RUNTIME)
++
++
++# BEGIN GENERATED: runtime-min (written by scripts/build_runtime.py; do not edit by hand)
++RUNTIME_MIN_SOURCE_SHA256 = "b82a1bfad28721e6b6c76c4d9eb4147d40af7599161b17283e82b09dd957f538"
++RUNTIME_MIN = {
++    False: '!function(){"use strict";var r,e,t=document.getElementById("__pk"),a=document.getElementById("__pnl"),o=document.getElementById("__lbl"),n=document.getElementById("__fill"),i=document.getElementById("__err");window.arcager=window.arcager||{},window.arcager.error=null,window.arcager.ready=new Promise(function(t,a){r=t,e=a});for(var c={},l=0;l<85;l++)c["0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ.-:+=^!/*?&<>()[]{}@%$#".charCodeAt(l)]=l;function s(r,e){var t,a=0,o=1;do{if(e>=r.length)throw Error("truncated Arcager metadata");if((a+=(127&(t=r[e++]))*o)>Number.MAX_SAFE_INTEGER)throw Error("Arcager metadata integer is too large");o*=128}while(128&t);return[a,e]}function f(r,e){return(r[e]|r[e+1]<<8|r[e+2]<<16|r[e+3]<<24)>>>0}function g(r){n&&(n.style.width=Math.max(0,Math.min(100,r))+"%"),o&&(o.textContent="Unpacking… "+Math.floor(r)+"%")}var p=["application/octet-stream","text/html","application/xhtml+xml","text/css","text/javascript","application/javascript","application/json","application/xml","text/xml","text/plain","text/csv","text/tab-separated-values","image/png","image/jpeg","image/webp","image/gif","image/svg+xml","image/bmp","image/x-icon","image/avif","font/woff","font/woff2","font/ttf","font/otf","application/vnd.ms-fontobject","application/pdf","application/postscript","audio/mpeg","audio/ogg","audio/wav","audio/mp4","audio/aac","audio/flac","audio/opus","video/mp4","video/webm","video/ogg","video/quicktime","text/markdown","application/zip","application/gzip","application/x-7z-compressed"];function h(r){for(var e=-1,t=0;t<r.length;t++){e^=r[t];for(var a=0;a<8;a++)e=e>>>1^3988292384&-(1&e)}return~e>>>0}async function u(r,e,t){if(t[e])return t[e];var a=r.streams[e],o=e+1<r.streams.length?r.streams[e+1].off:r.payload.length;if(a.off<0||o<a.off||o>r.payload.length)throw Error("invalid v4 stream payload boundary");var n,i=r.payload.subarray(a.off,o);if(0===a.algo)n=i;else if(1===a.algo)n=await async function(r){var e=new DecompressionStream("gzip"),t=e.writable.getWriter(),a=e.readable.getReader();t.write(r),t.close();for(var o=[],n=0;;){var i=await a.read();if(i.done)break;o.push(i.value),n+=i.value.length}for(var c=new Uint8Array(n),l=0,s=0;s<o.length;s++)c.set(o[s],l),l+=o[s].length;return c}(i);else{if(2!==a.algo)throw Error("unsupported stream compression");n=await async function(r){var e=new DecompressionStream("brotli"),t=e.writable.getWriter(),a=e.readable.getReader();t.write(r),t.close();for(var o=[],n=0;;){var i=await a.read();if(i.done)break;o.push(i.value),n+=i.value.length}for(var c=new Uint8Array(n),l=0,s=0;s<o.length;s++)c.set(o[s],l),l+=o[s].length;return c}(i)}if(n.length!==a.raw)throw Error("stream size mismatch");if(h(n)!==a.crc)throw Error("stream integrity check failed");return t[e]=n,n}function d(r){for(var e=((r=String(r).replace(/^\\uFEFF/,"").replace(/\\r\\n?/g,"\\n")).split("\\n",1)[0]||"").indexOf("\\t")>=0?"\\t":",",t=[],a=[],o="",n=!1,i=!1,c=0;c<r.length;c++){var l=r.charAt(c);n?\'"\'===l?\'"\'===r.charAt(c+1)?(o+=\'"\',c++):n=!1:o+=l:\'"\'===l?(n=!0,i=!0):l===e?(a.push(o),o="",i=!0):"\\n"===l?((i||""!==o)&&(a.push(o),t.push(a)),a=[],o="",i=!1):(o+=l,i=!0)}return(i||""!==o)&&(a.push(o),t.push(a)),t}(async function(){if("undefined"==typeof DecompressionStream)throw Error("This browser does not provide DecompressionStream.");if(!t)throw Error("Arcager v4 container block is missing.");t.getAttribute("data-e");for(var e=Number(t.getAttribute("data-n")||0),a=function(r,e){r=r.replace(/\\s+/g,"");var t=5*Math.ceil(e/4);if(r.length!==t)throw Error("invalid Arcager encoding length");for(var a=new Uint8Array(e),o=0,n=0;n<r.length&&o<e;n+=5){for(var i=0,l=0;l<5;l++){var s=c[r.charCodeAt(n+l)];if(void 0===s)throw Error("invalid Arcager encoding at "+n);i=85*i+s}o<e&&(a[o++]=i>>>24&255),o<e&&(a[o++]=i>>>16&255),o<e&&(a[o++]=i>>>8&255),o<e&&(a[o++]=255&i)}return a}(t.textContent||"",e),o=function(r){if(r.length<64)throw Error("v4 container truncated");if("ARCAGER4"!==(new TextDecoder).decode(r.subarray(0,8)))throw Error("invalid Arcager v4 container");if(4!==r[8])throw Error("unsupported Arcager container version "+r[8]);if(f(r,44)!==h(r.subarray(0,44)))throw Error("corrupt v4 header");var e=f(r,12),t=f(r,16),a=f(r,20),o=f(r,24),n=f(r,28),i=function(r){var e=f(r,32)+4294967296*f(r,36);if(e>Number.MAX_SAFE_INTEGER)throw Error("v4 payload is too large for this browser runtime");return e}(r),c=64+n,l=c+i;if(c<64||c>r.length||l>r.length)throw Error("corrupt v4 metadata boundary");if(l!==r.length)throw Error("corrupt v4 container size");var g=r.subarray(64,c);if(h(g)!==f(r,40))throw Error("corrupt v4 metadata");if(g.length<16)throw Error("truncated v4 metadata header");var u=0,d=f(g,0),v=f(g,4),m=f(g,8),w=f(g,12);if(d!==e||v!==t||m!==a||w!==o)throw Error("v4 count mismatch");u=16;for(var y=[],b=0,E=0;E<e;E++){if(u+3>g.length)throw Error("truncated stream table");var x=g[u]|g[u+1]<<8,A=g[u+2];if(u+=3,x>=p.length)throw Error("unknown v4 MIME id "+x);var k=s(g,u),_=k[0],I=b+(k=s(g,u=k[1]))[0];b=I;var j=(k=s(g,u=k[1]))[0];if((u=k[1])+4>g.length)throw Error("truncated stream CRC");var C=f(g,u);if(u+=4,I>i)throw Error("invalid v4 stream offset");y.push({mime:p[x],algo:A,count:_,off:I,raw:j,crc:C})}for(var R=[],U={},M=0;M<t;M++){var N=(k=s(g,u))[0];if(u=k[1],N>=e)throw Error("invalid v4 physical stream reference");k=s(g,u);var S=(U[N]||0)+k[0];if(u=k[1],U[N]=S,u+6>g.length)throw Error("truncated physical record");var B=g[u]|g[u+1]<<8,L=g[u+2],T=g[u+4]|g[u+5]<<8;if(u+=6,B>=p.length||T>=p.length)throw Error("unknown v4 physical MIME id");if(S>y[N].raw)throw Error("invalid v4 physical offset");R.push({stream:N,off:S,mime:p[B],flags:L,source:p[T]})}for(var O=new Array(e),D=0;D<e;D++)O[D]=0;for(var $=0;$<R.length;$++)O[R[$].stream]++;for(var z=0;z<e;z++)if(O[z]!==y[z].count)throw Error("v4 stream member-count mismatch");var F=[];for(z=0;z<o;z++){var G=(k=s(g,u))[0];if((u=k[1])+G>g.length)throw Error("truncated string table");F.push((new TextDecoder).decode(g.subarray(u,u+G))),u+=G}for(var W=[],X=0;X<a;X++){var q=s(g,u),H=q[0],P=($=(q=s(g,u=q[1]))[0],(q=s(g,u=q[1]))[0]);if((u=q[1])+2>g.length)throw Error("truncated logical record");if(L=g[u],T=g[u+1],u+=2,H>=F.length||$>=R.length||T>=p.length)throw Error("invalid v4 logical reference");W.push({path:F[H],physical:$,priority:P,flags:L,source:p[T]})}if(u!==g.length)throw Error("unexpected trailing v4 metadata");var J=new Array(R.length);for(N=0;N<y.length;N++){for(var K=[],Q=0;Q<R.length;Q++)R[Q].stream===N&&K.push(Q);K.sort(function(r,e){return R[r].off-e.off});for(var V=0;V<K.length;V++){var Y=R[K[V]].off,Z=V+1<K.length?R[K[V+1]].off:y[N].raw;if(Z<Y||Z>y[N].raw)throw Error("invalid v4 physical boundaries");J[K[V]]=Z}}return{streams:y,physical:R,logical:W,nextOff:J,payload:r.subarray(c,l)}}(a),n=[],i={},l=o.logical,v=0;v<o.logical.length;v++)i[o.logical[v].physical]=!0;var m={};for(v=0;v<o.physical.length;v++)m[o.physical[v].stream]=!0;for(var w={},y=Object.keys(m),b=0;b<y.length;b++)g(5+b/y.length*85),w[y[b]]=await u(o,Number(y[b]),n);g(95);var E=function(r,e){for(var t={},a={},o={},n={},i=[],c=0;c<r.physical.length;c++){var l=r.physical[c],s=e[l.stream],f=r.nextOff[c],g=s.subarray(l.off,f),p=URL.createObjectURL(new Blob([g],{type:l.mime}));o[c]=p,n[c]=p,i.push(p)}for(c=0;c<r.logical.length;c++){var h=r.logical[c];t[c]=n[h.physical]}function u(r){return r.replace(/arcager-res:(\\d+)([?#][^\\s"\'< >\\)\\]]*)?/g,function(r,e,a){var o=t[Number(e)];return o?o+(a||""):r})}function d(r,e){a[r]=e,a[r.replace(/^\\.\\//,"")]=e,a[r.replace(/^\\/+/,"")]=e,a[r.replace(/\\.[^.\\/]+$/,"")]=e;var t=r.split("/").pop().replace(/\\.[^.]+$/,"");void 0===a[t]&&(a[t]=e)}function v(r){for(var e=function(r){var e=r.split(/[?#]/,1)[0].replace(/\\\\/g,"/"),t=[e,e.replace(/^\\.\\//,""),e.replace(/^\\/+/,"")];try{t.push(decodeURIComponent(e))}catch(r){}return/\\.[^.\\/]+$/.test(e)&&t.push(e.replace(/\\.[^.\\/]+$/,"")),t}(r),t=0;t<e.length;t++)if(a[e[t]])return a[e[t]];return null}var m={};function w(t){var a=r.physical[t],o=a.stream,n=e[o],i=r.nextOff[t];return(new TextDecoder).decode(n.subarray(a.off,i))}for(var y=0;y<2;y++)for(var b=0;b<r.logical.length;b++){var E=r.logical[b].physical,x=r.physical[E],A=x.mime.toLowerCase();if(!(m[E]||"text/css"!==A&&"text/javascript"!==A&&"application/javascript"!==A&&"image/svg+xml"!==A)){m[E]=!0;var k=u(w(E)),_=URL.createObjectURL(new Blob([k],{type:x.mime}));if(n[E]&&n[E]!==o[E])try{URL.revokeObjectURL(n[E])}catch(r){}n[E]=_;for(var I=0;I<r.logical.length;I++)r.logical[I].physical===E&&(t[I]=_)}}for(c=0;c<r.logical.length;c++)p=n[(h=r.logical[c]).physical],8&h.flags||d(h.path,p);return{byLogical:t,physUrl:n,images:a,replaceTokens:function(r){return function(r){return r=r.replace(/\\b(src|href|poster|xlink:href)\\s*=\\s*(["\'])([^"\']+)\\2/gi,function(r,e,t,a){if(/^(?:https?:|data:|mailto:|tel:|javascript:|#|blob:)/i.test(a))return r;var o=v(a);return o?e+"="+t+o+(a.match(/[?#].*$/)||[""])[0]+t:r}),r=r.replace(/\\bsrcset\\s*=\\s*(["\'])([^"\']+)\\1/gi,function(r,e,t){var a=t.split(",").map(function(r){var e=r.trim().split(/\\s+/);if(!e[0])return r;var t=v(e[0]);return t&&(e[0]=t),e.join(" ")});return"srcset="+e+a.join(", ")+e}),r=r.replace(/url\\(\\s*(["\']?)([^"\')]+)\\1\\s*\\)/gi,function(r,e,t){if(/^(?:https?:|data:|blob:|#)/i.test(t))return r;var a=v(t);return a?"url("+e+a+(t.match(/[?#].*$/)||[""])[0]+e+")":r}),r}(u(r))},urls:i}}(o,w);window.arcager.images=E.images,window.arcager.csv={},window.arcager.getImage=function(r){for(var e=String(r).replace(/\\\\/g,"/").replace(/^(?:\\.\\/|\\/)+/,""),t=[e,e.replace(/\\.[^.\\/]+$/,"")],a=null,o=0;o<t.length&&!a;o++)a=E.images[t[o]]||E.images[t[o].toLowerCase()]||null;if(!a)return null;var n=new Image;return n.src=a,n};var x=-1;for(v=0;v<l.length;v++)if("index.html"===l[v].path){x=v;break}if(x<0)throw Error("v4 root HTML resource missing");var A=l[x],k=o.physical[A.physical],_=w[k.stream],I=o.nextOff[A.physical],j=(new TextDecoder).decode(_.subarray(k.off,I));j=E.replaceTokens(j);for(var C=0;C<y.length;C++)w[y[C]]=null;for(var R,U=[],M=/<script\\b([^>]*?)>([\\s\\S]*?)<\\/script\\s*>/gi;R=M.exec(j);)if(/\\btype\\s*=\\s*([\'"])text\\/csv\\1/i.test(R[1]||"")){var N=(R[1]||"").match(/\\bdata-key\\s*=\\s*([\'"])([^\'"]+)\\1/i),S=N?N[2]:"csv"+U.length;U.push({key:S,body:R[2].trim()})}for(var B=0;B<U.length;B++){var L=d(U[B].body),T=L.length?L[0]:[],O=L.slice(1).map(function(r){for(var e={},t=0;t<T.length;t++)e[T[t]]=void 0===r[t]?"":r[t];return e});window.arcager.csv[U[B].key]={rows:L,data:O}}document.title=(j.match(/<title[^>]*>([\\s\\S]*?)<\\/title>/i)||[])[1]||document.title,j=j.replace(/<\\/body>/i,\'<script>/* Arcager v4 cleanup */(function(){var p=document.getElementById("__pnl");if(p&&p.parentNode)p.parentNode.removeChild(p);var e=document.getElementById("__pk");if(e&&e.parentNode)e.parentNode.removeChild(e);})();<\\/script></body>\'),document.open(),document.write(j),document.close(),window.arcager.images=E.images,window.arcager.csv=window.arcager.csv,r()})().catch(function(r){var t=r&&r.message?r.message:String(r);window.arcager.error=r instanceof Error?r:new Error(t);var n=document.getElementById("__pwf");n&&(n.hidden=!0),i&&(i.textContent=t),o&&(o.textContent="Failed to unpack"),a&&(a.hidden=!1),window.console&&console.error(r),e(window.arcager.error)})}();\n',
++    True: '!function(){"use strict";var r,e,t=document.getElementById("__pk"),a=document.getElementById("__pnl"),n=document.getElementById("__lbl"),o=document.getElementById("__fill"),i=document.getElementById("__err");window.arcager=window.arcager||{},window.arcager.error=null,window.arcager.ready=new Promise(function(t,a){r=t,e=a});for(var c={},l=0;l<85;l++)c["0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ.-:+=^!/*?&<>()[]{}@%$#".charCodeAt(l)]=l;function s(r){for(var e=atob(r),t=new Uint8Array(e.length),a=0;a<e.length;a++)t[a]=e.charCodeAt(a);return t}function f(r,e){var t,a=0,n=1;do{if(e>=r.length)throw Error("truncated Arcager metadata");if((a+=(127&(t=r[e++]))*n)>Number.MAX_SAFE_INTEGER)throw Error("Arcager metadata integer is too large");n*=128}while(128&t);return[a,e]}function u(r,e){return(r[e]|r[e+1]<<8|r[e+2]<<16|r[e+3]<<24)>>>0}function p(r){return new Promise(function(e,t){var a=document.getElementById("__pwf"),o=document.getElementById("__pw"),c=document.getElementById("__bar");if(a&&o)n&&(n.textContent="This page is password protected"),i&&(i.textContent=r||""),c&&(c.hidden=!0),a.hidden=!1,o.value="",o.focus(),a.onsubmit=function(r){r.preventDefault();var t=o.value;a.hidden=!0,i&&(i.textContent=""),n&&(n.textContent="Checking password…"),e(t)};else{var l=prompt("Enter Arcager password:");null===l?t(Error("password entry cancelled")):e(l)}})}function d(r){o&&(o.style.width=Math.max(0,Math.min(100,r))+"%"),n&&(n.textContent="Unpacking… "+Math.floor(r)+"%")}var g=["application/octet-stream","text/html","application/xhtml+xml","text/css","text/javascript","application/javascript","application/json","application/xml","text/xml","text/plain","text/csv","text/tab-separated-values","image/png","image/jpeg","image/webp","image/gif","image/svg+xml","image/bmp","image/x-icon","image/avif","font/woff","font/woff2","font/ttf","font/otf","application/vnd.ms-fontobject","application/pdf","application/postscript","audio/mpeg","audio/ogg","audio/wav","audio/mp4","audio/aac","audio/flac","audio/opus","video/mp4","video/webm","video/ogg","video/quicktime","text/markdown","application/zip","application/gzip","application/x-7z-compressed"];function h(r){for(var e=-1,t=0;t<r.length;t++){e^=r[t];for(var a=0;a<8;a++)e=e>>>1^3988292384&-(1&e)}return~e>>>0}async function v(r,e,t){var a=new TextEncoder,n=await crypto.subtle.importKey("raw",a.encode(r),{name:"PBKDF2"},!1,["deriveKey"]);return crypto.subtle.deriveKey({name:"PBKDF2",salt:s(e),iterations:t,hash:"SHA-256"},n,{name:"AES-GCM",length:256},!1,["decrypt"])}async function m(r,e,t){return new Uint8Array(await crypto.subtle.decrypt({name:"AES-GCM",iv:s(e)},r,t))}async function w(r,e,t){if(t[e])return t[e];var a=r.streams[e],n=e+1<r.streams.length?r.streams[e+1].off:r.payload.length;if(a.off<0||n<a.off||n>r.payload.length)throw Error("invalid v4 stream payload boundary");var o,i=r.payload.subarray(a.off,n);if(0===a.algo)o=i;else if(1===a.algo)o=await async function(r){var e=new DecompressionStream("gzip"),t=e.writable.getWriter(),a=e.readable.getReader();t.write(r),t.close();for(var n=[],o=0;;){var i=await a.read();if(i.done)break;n.push(i.value),o+=i.value.length}for(var c=new Uint8Array(o),l=0,s=0;s<n.length;s++)c.set(n[s],l),l+=n[s].length;return c}(i);else{if(2!==a.algo)throw Error("unsupported stream compression");o=await async function(r){var e=new DecompressionStream("brotli"),t=e.writable.getWriter(),a=e.readable.getReader();t.write(r),t.close();for(var n=[],o=0;;){var i=await a.read();if(i.done)break;n.push(i.value),o+=i.value.length}for(var c=new Uint8Array(o),l=0,s=0;s<n.length;s++)c.set(n[s],l),l+=n[s].length;return c}(i)}if(o.length!==a.raw)throw Error("stream size mismatch");if(h(o)!==a.crc)throw Error("stream integrity check failed");return t[e]=o,o}function y(r){for(var e=((r=String(r).replace(/^\\uFEFF/,"").replace(/\\r\\n?/g,"\\n")).split("\\n",1)[0]||"").indexOf("\\t")>=0?"\\t":",",t=[],a=[],n="",o=!1,i=!1,c=0;c<r.length;c++){var l=r.charAt(c);o?\'"\'===l?\'"\'===r.charAt(c+1)?(n+=\'"\',c++):o=!1:n+=l:\'"\'===l?(o=!0,i=!0):l===e?(a.push(n),n="",i=!0):"\\n"===l?((i||""!==n)&&(a.push(n),t.push(a)),a=[],n="",i=!1):(n+=l,i=!0)}return(i||""!==n)&&(a.push(n),t.push(a)),t}(async function(){if("undefined"==typeof DecompressionStream)throw Error("This browser does not provide DecompressionStream.");if(!t)throw Error("Arcager v4 container block is missing.");var e="1"===t.getAttribute("data-e"),a=Number(t.getAttribute("data-n")||0),o=function(r,e){r=r.replace(/\\s+/g,"");var t=5*Math.ceil(e/4);if(r.length!==t)throw Error("invalid Arcager encoding length");for(var a=new Uint8Array(e),n=0,o=0;o<r.length&&n<e;o+=5){for(var i=0,l=0;l<5;l++){var s=c[r.charCodeAt(o+l)];if(void 0===s)throw Error("invalid Arcager encoding at "+o);i=85*i+s}n<e&&(a[n++]=i>>>24&255),n<e&&(a[n++]=i>>>16&255),n<e&&(a[n++]=i>>>8&255),n<e&&(a[n++]=255&i)}return a}(t.textContent||"",a),i=null;if(e){if(!crypto||!crypto.subtle)throw Error("Encrypted Arcager packages require Web Crypto support.");for(var l=t.getAttribute("data-s"),b=t.getAttribute("data-iv"),E=Number(t.getAttribute("data-i")),x=t.getAttribute("data-ck"),A="";;){var k=await p(A);try{var _=await v(k,l,E),C=await m(_,t.getAttribute("data-civ"),s(x));if("arcager-ok"!==(new TextDecoder).decode(C))throw Error("bad password");i=_;break}catch(r){window.console&&console.warn("Arcager: incorrect password"),A="Incorrect password. Please try again."}}var I=document.getElementById("__bar");I&&(I.hidden=!1),n&&(n.textContent="Unpacking…"),o=await m(i,b,o)}for(var B=function(r){if(r.length<64)throw Error("v4 container truncated");if("ARCAGER4"!==(new TextDecoder).decode(r.subarray(0,8)))throw Error("invalid Arcager v4 container");if(4!==r[8])throw Error("unsupported Arcager container version "+r[8]);if(u(r,44)!==h(r.subarray(0,44)))throw Error("corrupt v4 header");var e=u(r,12),t=u(r,16),a=u(r,20),n=u(r,24),o=u(r,28),i=function(r){var e=u(r,32)+4294967296*u(r,36);if(e>Number.MAX_SAFE_INTEGER)throw Error("v4 payload is too large for this browser runtime");return e}(r),c=64+o,l=c+i;if(c<64||c>r.length||l>r.length)throw Error("corrupt v4 metadata boundary");if(l!==r.length)throw Error("corrupt v4 container size");var s=r.subarray(64,c);if(h(s)!==u(r,40))throw Error("corrupt v4 metadata");if(s.length<16)throw Error("truncated v4 metadata header");var p=0,d=u(s,0),v=u(s,4),m=u(s,8),w=u(s,12);if(d!==e||v!==t||m!==a||w!==n)throw Error("v4 count mismatch");p=16;for(var y=[],b=0,E=0;E<e;E++){if(p+3>s.length)throw Error("truncated stream table");var x=s[p]|s[p+1]<<8,A=s[p+2];if(p+=3,x>=g.length)throw Error("unknown v4 MIME id "+x);var k=f(s,p),_=k[0],C=b+(k=f(s,p=k[1]))[0];b=C;var I=(k=f(s,p=k[1]))[0];if((p=k[1])+4>s.length)throw Error("truncated stream CRC");var B=u(s,p);if(p+=4,C>i)throw Error("invalid v4 stream offset");y.push({mime:g[x],algo:A,count:_,off:C,raw:I,crc:B})}for(var U=[],j={},R=0;R<t;R++){var S=(k=f(s,p))[0];if(p=k[1],S>=e)throw Error("invalid v4 physical stream reference");k=f(s,p);var M=(j[S]||0)+k[0];if(p=k[1],j[S]=M,p+6>s.length)throw Error("truncated physical record");var T=s[p]|s[p+1]<<8,D=s[p+2],N=s[p+4]|s[p+5]<<8;if(p+=6,T>=g.length||N>=g.length)throw Error("unknown v4 physical MIME id");if(M>y[S].raw)throw Error("invalid v4 physical offset");U.push({stream:S,off:M,mime:g[T],flags:D,source:g[N]})}for(var L=new Array(e),O=0;O<e;O++)L[O]=0;for(var F=0;F<U.length;F++)L[U[F].stream]++;for(var $=0;$<e;$++)if(L[$]!==y[$].count)throw Error("v4 stream member-count mismatch");var z=[];for($=0;$<n;$++){var G=(k=f(s,p))[0];if((p=k[1])+G>s.length)throw Error("truncated string table");z.push((new TextDecoder).decode(s.subarray(p,p+G))),p+=G}for(var K=[],P=0;P<a;P++){var W=f(s,p),q=W[0],H=(F=(W=f(s,p=W[1]))[0],(W=f(s,p=W[1]))[0]);if((p=W[1])+2>s.length)throw Error("truncated logical record");if(D=s[p],N=s[p+1],p+=2,q>=z.length||F>=U.length||N>=g.length)throw Error("invalid v4 logical reference");K.push({path:z[q],physical:F,priority:H,flags:D,source:g[N]})}if(p!==s.length)throw Error("unexpected trailing v4 metadata");var X=new Array(U.length);for(S=0;S<y.length;S++){for(var J=[],Q=0;Q<U.length;Q++)U[Q].stream===S&&J.push(Q);J.sort(function(r,e){return U[r].off-e.off});for(var V=0;V<J.length;V++){var Y=U[J[V]].off,Z=V+1<J.length?U[J[V+1]].off:y[S].raw;if(Z<Y||Z>y[S].raw)throw Error("invalid v4 physical boundaries");X[J[V]]=Z}}return{streams:y,physical:U,logical:K,nextOff:X,payload:r.subarray(c,l)}}(o),U=[],j={},R=B.logical,S=0;S<B.logical.length;S++)j[B.logical[S].physical]=!0;var M={};for(S=0;S<B.physical.length;S++)M[B.physical[S].stream]=!0;for(var T={},D=Object.keys(M),N=0;N<D.length;N++)d(5+N/D.length*85),T[D[N]]=await w(B,Number(D[N]),U);d(95);var L=function(r,e){for(var t={},a={},n={},o={},i=[],c=0;c<r.physical.length;c++){var l=r.physical[c],s=e[l.stream],f=r.nextOff[c],u=s.subarray(l.off,f),p=URL.createObjectURL(new Blob([u],{type:l.mime}));n[c]=p,o[c]=p,i.push(p)}for(c=0;c<r.logical.length;c++){var d=r.logical[c];t[c]=o[d.physical]}function g(r){return r.replace(/arcager-res:(\\d+)([?#][^\\s"\'< >\\)\\]]*)?/g,function(r,e,a){var n=t[Number(e)];return n?n+(a||""):r})}function h(r,e){a[r]=e,a[r.replace(/^\\.\\//,"")]=e,a[r.replace(/^\\/+/,"")]=e,a[r.replace(/\\.[^.\\/]+$/,"")]=e;var t=r.split("/").pop().replace(/\\.[^.]+$/,"");void 0===a[t]&&(a[t]=e)}function v(r){for(var e=function(r){var e=r.split(/[?#]/,1)[0].replace(/\\\\/g,"/"),t=[e,e.replace(/^\\.\\//,""),e.replace(/^\\/+/,"")];try{t.push(decodeURIComponent(e))}catch(r){}return/\\.[^.\\/]+$/.test(e)&&t.push(e.replace(/\\.[^.\\/]+$/,"")),t}(r),t=0;t<e.length;t++)if(a[e[t]])return a[e[t]];return null}var m={};function w(t){var a=r.physical[t],n=a.stream,o=e[n],i=r.nextOff[t];return(new TextDecoder).decode(o.subarray(a.off,i))}for(var y=0;y<2;y++)for(var b=0;b<r.logical.length;b++){var E=r.logical[b].physical,x=r.physical[E],A=x.mime.toLowerCase();if(!(m[E]||"text/css"!==A&&"text/javascript"!==A&&"application/javascript"!==A&&"image/svg+xml"!==A)){m[E]=!0;var k=g(w(E)),_=URL.createObjectURL(new Blob([k],{type:x.mime}));if(o[E]&&o[E]!==n[E])try{URL.revokeObjectURL(o[E])}catch(r){}o[E]=_;for(var C=0;C<r.logical.length;C++)r.logical[C].physical===E&&(t[C]=_)}}for(c=0;c<r.logical.length;c++)p=o[(d=r.logical[c]).physical],8&d.flags||h(d.path,p);return{byLogical:t,physUrl:o,images:a,replaceTokens:function(r){return function(r){return r=r.replace(/\\b(src|href|poster|xlink:href)\\s*=\\s*(["\'])([^"\']+)\\2/gi,function(r,e,t,a){if(/^(?:https?:|data:|mailto:|tel:|javascript:|#|blob:)/i.test(a))return r;var n=v(a);return n?e+"="+t+n+(a.match(/[?#].*$/)||[""])[0]+t:r}),r=r.replace(/\\bsrcset\\s*=\\s*(["\'])([^"\']+)\\1/gi,function(r,e,t){var a=t.split(",").map(function(r){var e=r.trim().split(/\\s+/);if(!e[0])return r;var t=v(e[0]);return t&&(e[0]=t),e.join(" ")});return"srcset="+e+a.join(", ")+e}),r=r.replace(/url\\(\\s*(["\']?)([^"\')]+)\\1\\s*\\)/gi,function(r,e,t){if(/^(?:https?:|data:|blob:|#)/i.test(t))return r;var a=v(t);return a?"url("+e+a+(t.match(/[?#].*$/)||[""])[0]+e+")":r}),r}(g(r))},urls:i}}(B,T);window.arcager.images=L.images,window.arcager.csv={},window.arcager.getImage=function(r){for(var e=String(r).replace(/\\\\/g,"/").replace(/^(?:\\.\\/|\\/)+/,""),t=[e,e.replace(/\\.[^.\\/]+$/,"")],a=null,n=0;n<t.length&&!a;n++)a=L.images[t[n]]||L.images[t[n].toLowerCase()]||null;if(!a)return null;var o=new Image;return o.src=a,o};var O=-1;for(S=0;S<R.length;S++)if("index.html"===R[S].path){O=S;break}if(O<0)throw Error("v4 root HTML resource missing");var F=R[O],$=B.physical[F.physical],z=T[$.stream],G=B.nextOff[F.physical],K=(new TextDecoder).decode(z.subarray($.off,G));K=L.replaceTokens(K);for(var P=0;P<D.length;P++)T[D[P]]=null;for(var W,q=[],H=/<script\\b([^>]*?)>([\\s\\S]*?)<\\/script\\s*>/gi;W=H.exec(K);)if(/\\btype\\s*=\\s*([\'"])text\\/csv\\1/i.test(W[1]||"")){var X=(W[1]||"").match(/\\bdata-key\\s*=\\s*([\'"])([^\'"]+)\\1/i),J=X?X[2]:"csv"+q.length;q.push({key:J,body:W[2].trim()})}for(var Q=0;Q<q.length;Q++){var V=y(q[Q].body),Y=V.length?V[0]:[],Z=V.slice(1).map(function(r){for(var e={},t=0;t<Y.length;t++)e[Y[t]]=void 0===r[t]?"":r[t];return e});window.arcager.csv[q[Q].key]={rows:V,data:Z}}document.title=(K.match(/<title[^>]*>([\\s\\S]*?)<\\/title>/i)||[])[1]||document.title,K=K.replace(/<\\/body>/i,\'<script>/* Arcager v4 cleanup */(function(){var p=document.getElementById("__pnl");if(p&&p.parentNode)p.parentNode.removeChild(p);var e=document.getElementById("__pk");if(e&&e.parentNode)e.parentNode.removeChild(e);})();<\\/script></body>\'),document.open(),document.write(K),document.close(),window.arcager.images=L.images,window.arcager.csv=window.arcager.csv,r()})().catch(function(r){var t=r&&r.message?r.message:String(r);window.arcager.error=r instanceof Error?r:new Error(t);var o=document.getElementById("__pwf");o&&(o.hidden=!0),i&&(i.textContent=t),n&&(n.textContent="Failed to unpack"),a&&(a.hidden=!1),window.console&&console.error(r),e(window.arcager.error)})}();\n',
++}
++# END GENERATED: runtime-min
++
++
++def runtime_is_prebuilt() -> bool:
++    """True when the embedded minified loader was built from exactly the current JS_RUNTIME."""
++    return (bool(RUNTIME_MIN.get(False)) and bool(RUNTIME_MIN.get(True))
++            and RUNTIME_MIN_SOURCE_SHA256 == hashlib.sha256(JS_RUNTIME.encode("utf-8")).hexdigest())
++
++
++def loader_script(encrypted: bool, minify: bool, vlog_fn=None) -> str:
++    """The loader script to embed. --minify uses the copy shipped inside this file, so it needs no extra tools."""
++    source = runtime_source(encrypted)
++    if not minify:
++        return source
++    if runtime_is_prebuilt():
++        if vlog_fn:
++            vlog_fn(f"loader: built-in minified copy ({len(source)} -> {len(RUNTIME_MIN[encrypted])} chars)")
++        return RUNTIME_MIN[encrypted]
++    # Only happens while developing the loader: the embedded copy is out of date.
++    return maybe_minify_js(source, True, vlog_fn)
++
++
+ def shell_html(container: bytes, *, password_info=None, hidden_info=None, title="Arcager", minify=False, vlog_fn=None):
+     enc=password_info is not None
+     attrs={"data-v":"4","data-e":"1" if enc else "0","data-n":str(len(container))}
+@@ -1975,8 +2073,11 @@ def shell_html(container: bytes, *, password_info=None, hidden_info=None, title=
+     if hidden_info:
+         hattrs=" ".join(f'{k}="{escape_attr(str(v))}"' for k,v in hidden_info.items() if k!="data")
+         hidden_block=f'<script type="text/plain" id="__hid" {hattrs}>{z85_script_safe(hidden_info["data"])}</script>'
+-    runtime = maybe_minify_js(JS_RUNTIME, minify, vlog_fn)
+-    return f'''{SIGNATURE}\n<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="dark"><title data-arcager-shell>{escape_text(title)}</title><style id="__arcager_style">{LOADER_CSS}</style></head><body><div id="__pnl"><div id="__box"><div id="__brand">ARCAGER</div><div id="__lbl">Unpacking…</div><div id="__bar"><div id="__fill"></div></div><form id="__pwf" hidden autocomplete="off"><input id="__pw" type="password" autocomplete="off" spellcheck="false" placeholder="Password" aria-label="Password"><button type="submit">Unlock</button></form><div id="__err" role="alert"></div></div></div><noscript><p style="position:fixed;inset:0;display:flex;align-items:center;justify-content:center;margin:0;background:#0f1115;color:#e6e8ec;font:16px system-ui,sans-serif;z-index:2147483647">This page is packed with Arcager and needs JavaScript to open.</p></noscript><script type="application/octet-stream" id="__pk" {attrs_s}>{container_z85}</script>{hidden_block}<script>{runtime}</script></body></html>'''
++    runtime = loader_script(enc, minify, vlog_fn)
++    css = LOADER_CSS + (LOADER_CSS_PW if enc else "")
++    pw_form = ('<form id="__pwf" hidden autocomplete="off"><input id="__pw" type="password" autocomplete="off" '
++               'spellcheck="false" placeholder="Password" aria-label="Password"><button type="submit">Unlock</button></form>') if enc else ""
++    return f'''{SIGNATURE}\n<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="dark"><title data-arcager-shell>{escape_text(title)}</title><style id="__arcager_style">{css}</style></head><body><div id="__pnl"><div id="__box"><div id="__brand">ARCAGER</div><div id="__lbl">Unpacking…</div><div id="__bar"><div id="__fill"></div></div>{pw_form}<div id="__err" role="alert"></div></div></div><noscript><p style="position:fixed;inset:0;margin:0;padding:24px;background:#0f1115;color:#e6e8ec;font:16px system-ui">This page is packed with Arcager and needs JavaScript to open.</p></noscript><script type="application/octet-stream" id="__pk" {attrs_s}>{container_z85}</script>{hidden_block}<script>{runtime}</script></body></html>'''
+ 
+ # ---------- pack pipeline ----------
+ def apply_base_href(html: str, base_href: str) -> str:
+@@ -2937,13 +3038,14 @@ class Opts:
+     extract_types: list=dataclasses.field(default_factory=lambda:['all'])
+     only: list=dataclasses.field(default_factory=list)
+     skip_unused: bool=False
++    install_deps: bool=False
+     seen_pack_options: list=dataclasses.field(default_factory=list)   # pack-only options the user typed (for misuse warnings)
+ 
+ 
+ _KNOWN_OPTIONS = ("-h", "--help", "-V", "--version", "-v", "--verbose", "-f", "--force", "-r", "--recursive",
+                   "-u", "--unpack", "-M", "--merge", "-o", "--output", "-O", "--output-dir", "--prefix",
+                   "-E", "--encrypt", "--password", "--bundle-password", "--strip-metadata", "--base-href",
+-                  "--ignore-uris", "--skip-unused", "-m", "--minify", "-c", "--compression", "-b", "--bundle",
++                  "--ignore-uris", "--skip-unused", "--install-deps", "-m", "--minify", "-c", "--compression", "-b", "--bundle",
+                   "-l", "--list", "-x", "--extract", "--only")
+ 
+ 
+@@ -2992,7 +3094,7 @@ PACKING
+                        Visible bundles are available to your page (see arcager.images).
+                        'hidden' stores them as an opaque encrypted payload with its own
+                        password that the page never reads; extract it with -x pack.
+-  -m, --minify [lossy] Shrink Arcager's own loader script (needs: npm install -g terser).
++  -m, --minify [lossy] Use a minified loader script (about 4.5 KB smaller per package; built in).
+                        'lossy' also minifies your HTML (comments/whitespace are removed).
+   -r, --recursive      When an input is a folder, also pack the HTML files in its subfolders.
+   --base-href URL      Insert <base href="URL"> so relative links resolve against URL.
+@@ -3032,20 +3134,25 @@ OUTPUT LOCATION AND NAMES
+   -o FILE      exact output file (one input only)      -O DIR   output folder
+   --prefix P   prefix for packed file names (default: packed_; unpacked files are unpacked_)
+   -f, --force  overwrite existing files without asking   -v, --verbose  show details
+-  -V, --version  version and which components are installed (incl. Terser)    -h, --help  this text
++  -V, --version  version and which components are installed (incl. Terser)
++  --install-deps install the packages Arcager needs into this Python (pip), then exit
++  -h, --help     this text
+ 
+ EXIT CODES
+   0 success    1 usage error or unreadable input    2 some files failed
+   3 nothing processed (every input skipped, or -x found nothing)    130 interrupted
+ 
+ REQUIREMENTS
+-  Python 3.8+ and the 'cryptography' package (pip install -r requirements.txt): encryption
+-  is part of Arcager itself. Optional extras: Brotli, Pillow, Terser (-V shows what is found).
++  Python 3.8+ and three packages, installed in one step:  pip install -r requirements.txt
++  or simply:  arcager --install-deps  (installs whatever is missing into this Python).
++    cryptography  encryption (-E, hidden bundles)       brotli  -c brotli
++    Pillow        lossy and --strip-metadata
++  -V shows what was found. Nothing else is needed: --minify is built in.
+ 
+ MORE
+   README.md            overview and examples         docs/CLI.md   command reference
+   docs/API.md          window.arcager (images + CSV) docs/ARCHITECTURE.md   internals
+-  Extras: pip install -r requirements-optional.txt            Check your setup: arcager -V
++  Check your setup: arcager -V                                 Fix it: arcager --install-deps
+ """
+ 
+ 
+@@ -3112,6 +3219,7 @@ def parse_cli(argv):
+         elif a in ('-E','--encrypt'): o.encrypt=True; o.seen_pack_options.append(a)
+         elif a=='--password': o.password=value(a,'a password')
+         elif a=='--bundle-password': o.bundle_password=value(a,'a password')
++        elif a=='--install-deps': o.install_deps=True
+         elif a=='--skip-unused': o.skip_unused=True; o.seen_pack_options.append(a)
+         elif a=='--strip-metadata': o.strip_metadata=True; o.seen_pack_options.append(a)
+         elif a=='--base-href': o.base_href=value(a,'a URL'); o.seen_pack_options.append(a)
+@@ -3257,6 +3365,8 @@ def _check_inputs_for_reading(opts, verb):
+ 
+ def main(argv=None):
+     opts=parse_cli(sys.argv[1:] if argv is None else argv)
++    if opts.install_deps:
++        raise SystemExit(install_dependencies())
+     ensure_core_dependencies()
+     modes=[n for n,v in (('-l',opts.list_mode),('-x',opts.extract_mode),('-u',opts.unpack),('-M',bool(opts.merge))) if v]
+     if len(modes)>1: raise UsageError(f"{' and '.join(modes)} cannot be used together; choose one per run (for example run -l first, then -x).")
+@@ -3268,7 +3378,7 @@ def main(argv=None):
+     if opts.output and len(opts.inputs)>1: raise UsageError(f"-o names ONE output file, but {len(opts.inputs)} inputs were given. Use -O FOLDER to choose where the outputs go.")
+     if opts.output and (opts.list_mode or opts.extract_mode): raise UsageError("-o does not apply to -l/-x. To choose where extracted files go, use -O FOLDER.")
+     if opts.algo==2 and not HAS_BROTLI and not reading:
+-        raise RuntimeError(f"Brotli needs the optional 'brotli' package, which this Python does not have. Install it with:\n  {sys.executable} -m pip install brotli\nor use the default (-c gzip).")
++        raise RuntimeError(f"-c brotli needs the 'brotli' package, which this Python does not have. Install it with:\n  {sys.executable} arcager.py --install-deps\nor use the default (-c gzip).")
+     if reading and opts.seen_pack_options:
+         names=sorted({_PACK_ONLY_NOTE[x] for x in opts.seen_pack_options if x in _PACK_ONLY_NOTE})
+         if names: warn(f"{', '.join(names)} only apply when packing and were ignored.")
+@@ -3282,9 +3392,11 @@ def main(argv=None):
+         if (opts.lossy or opts.strip_metadata) and not HAS_PIL:
+             what=" and ".join(x for x,on in (("lossy",opts.lossy),("--strip-metadata",opts.strip_metadata)) if on)
+             warn(f"{what} {'need' if (opts.lossy and opts.strip_metadata) else 'needs'} Pillow, which is not installed, so images are kept exactly as they are. "
+-                 f"Install it with: {sys.executable} -m pip install Pillow")
+-        if opts.minify and shutil.which("terser") is None:
+-            warn("--minify needs Terser, which was not found, so the loader script is left unminified. Install it with: npm install -g terser")
++                 f"Install it with: {sys.executable} arcager.py --install-deps")
++        if opts.minify and not runtime_is_prebuilt() and shutil.which("terser") is None:
++            warn("--minify: the built-in minified loader is out of date with the loader source (you are editing arcager.py?) "
++                 "and Terser is not installed to rebuild it, so the loader is left unminified. "
++                 "Maintainers: npm install -g terser, then run python scripts/build_runtime.py")
+     if (opts.list_mode or opts.extract_mode): _check_inputs_for_reading(opts, '-l' if opts.list_mode else '-x')
+ 
+     if opts.list_mode:
+diff --git a/docs/API.md b/docs/API.md
+index 736ebb2..c93c3f7 100644
+--- a/docs/API.md
++++ b/docs/API.md
+@@ -1,4 +1,4 @@
+-# Arcager 4.2 browser API
++# Arcager 4.3 browser API
+ 
+ A packed page carries a small runtime that unpacks everything and then exposes a handful of
+ helpers on `window.arcager`. This document is the complete reference, with examples you can
+diff --git a/docs/ARCHITECTURE.md b/docs/ARCHITECTURE.md
+index 6253a2b..ef04f57 100644
+--- a/docs/ARCHITECTURE.md
++++ b/docs/ARCHITECTURE.md
+@@ -1,4 +1,4 @@
+-# Arcager 4.2 architecture
++# Arcager 4.3 architecture
+ 
+ Arcager 4.x is built around one practical goal: **turn a collection of related web resources into one reliable HTML artifact without making the user manage the internal packaging decisions**.
+ 
+@@ -317,11 +317,15 @@ This is a clean container-format break. The v4 core does not contain a v3 decode
+ 
+ Explicit repacking/reoptimization is intentionally separate from the core v4 format so the normal packaging path stays predictable.
+ 
+-## 13. Loader shell, password prompt and encryption dependency
++## 13. Loader shell, password prompt and dependencies
+ 
+-The HTML shell around every package is a dark loader (`LOADER_CSS`): `color-scheme: dark`, a dark panel, and a progress bar with a visible fill. It exists only while the package unpacks; the unpacked page then replaces the whole document, so it never leaks into your page's styling. The password prompt for encrypted packages is an in-page form (`#__pwf`) rather than the browser's native `prompt()`/`alert()` dialogs (which are bright and cannot be styled); `prompt()` remains only as a fallback if the form is missing. A wrong password shows its message in the panel and asks again. A `<noscript>` message explains that JavaScript is needed.
++The HTML shell around every package is a dark loader (`LOADER_CSS`): `color-scheme: dark`, a dark panel, and a progress bar with a visible fill. It exists only while the package unpacks; the unpacked page then replaces the whole document, so it never leaks into your page's styling. A `<noscript>` message explains that JavaScript is needed.
+ 
+-On the Python side `cryptography` is a **required** dependency, because encryption is a core feature. `ensure_core_dependencies()` runs at the start of every operation (but not for `--help` / `-V`, which must still work to explain the problem) and fails with the exact install command. Brotli, Pillow and Terser stay optional; `-V` reports all of them, including the Terser version (`terser_info()`).
++**Only encrypted packages carry the password UI.** The shell and loader are stored as plain text (they must be readable before anything can be unpacked), so every byte is paid in full. The password form markup, its CSS (`LOADER_CSS_PW`), the in-page prompt (`askPassword`, instead of the browser's bright native `prompt()`/`alert()`) and the decryption code are therefore marked `/*@ENC*/ … /*@/ENC*/` inside `JS_RUNTIME`, and `runtime_source(encrypted)` removes those regions for plain packages. A plain package ends up slightly *smaller* than the 4.0 loader despite the dark theme.
++
++**Built-in minification.** `--minify` uses `RUNTIME_MIN`, a minified copy of the loader (one for plain, one for encrypted packages) embedded in `arcager.py` between the `GENERATED: runtime-min` markers. It records the SHA-256 of the `JS_RUNTIME` it was built from; `runtime_is_prebuilt()` compares it with the current source, so a stale copy is never shipped silently. Maintainers regenerate it with `scripts/build_runtime.py` (needs Terser) after editing the loader; a test fails with that instruction if they forget. Users never need Terser.
++
++**Python dependencies.** `cryptography`, `brotli` and `Pillow` are installed together from `requirements.txt` (or by `--install-deps`). `cryptography` is a hard requirement: `ensure_core_dependencies()` runs at the start of every operation (but not for `--help` / `-V` / `--install-deps`, which must work to explain or fix the problem). A missing Brotli or Pillow only affects the feature that needs it, with an error or warning that names the fix. `install_dependencies()` runs `python -m pip install` for the missing packages in the interpreter that runs Arcager and turns the common pip failures (OS-managed Python, no network, no pip) into instructions.
+ 
+ ## 14. Unreferenced files in merge mode
+ 
+diff --git a/docs/CLI.md b/docs/CLI.md
+index 0bca6cc..efc8f99 100644
+--- a/docs/CLI.md
++++ b/docs/CLI.md
+@@ -1,4 +1,4 @@
+-# Arcager 4.2 command reference
++# Arcager 4.3 command reference
+ 
+ `arcager --help` prints the same reference as the last section of this page, so you always
+ have it offline. This page adds the explanations: what each mode does, how types work, and
+@@ -73,9 +73,12 @@ Notes beyond that:
+ * **`-M`** keeps files that nothing links to (and warns about them, see above). Tables
+   linked with `<link rel="csv">` are stored once, inline, and exposed as `window.arcager.csv`
+   ([API](API.md#csv-tables)).
+-* **Encryption is built in.** `-E` needs the `cryptography` package, which is a *required*
+-  part of Arcager (`python -m pip install -r requirements.txt`). If it is missing, Arcager stops
+-  at once with the exact install command.
++* **Encryption is built in.** `-E` uses the `cryptography` package, which is a *required*
++  part of Arcager (`python -m pip install -r requirements.txt`, or `arcager --install-deps`). If it
++  is missing, Arcager stops at once with the exact install command. Only encrypted packages carry
++  the password form and decryption code, so ordinary packages are not larger because of them.
++* **`--minify` needs no extra tools.** The minified loader is built into `arcager.py` (about
++  4.5 KB smaller per package).
+ * **Passwords.** Leave `--password` out and Arcager asks without echoing it. On the command line
+   it is visible in shell history. Giving `--password` without `-E` does not encrypt anything;
+   Arcager warns you.
+@@ -218,37 +221,49 @@ Every message is written to tell you what to do next. A few common ones:
+ | `unknown option '--strip-metdata'. Did you mean …` | Fix the spelling; Arcager suggests the closest option. |
+ | `'elements' is not a resource type` | `-l`/`-x` take types. To choose by name use `--only`. |
+ | `missing local resources` | A file your HTML/CSS/JS refers to is not there. Names are case-sensitive on Linux and macOS. |
+-| `Arcager needs the 'cryptography' package` | Run the command in the message. It is the one required package (`requirements.txt`). |
+-| `Brotli needs the optional 'brotli' package` | Run the pip command printed in the message, with the same Python that runs Arcager, or use `-c gzip`. |
++| `Arcager needs the 'cryptography' package` | Run `arcager --install-deps`. It installs everything Arcager needs in one step. |
++| `-c brotli needs the 'brotli' package` | Run `arcager --install-deps` (or the command printed), or use `-c gzip`. |
+ | `incorrect password, or the file is damaged` | Check the password. The hidden bundle has a separate one (`--bundle-password`). |
+ | `N external resource(s) are loaded from the network` | The page still needs the internet for those files. Download them into the folder and reference them by relative path to make it fully offline. |
+ | `N files … are not linked from index.html` | See [Files that nothing uses](#files-that-nothing-uses--m). Delete them or add `--skip-unused`. |
+-| `lossy needs Pillow` | `lossy` / `--strip-metadata` need Pillow; without it images are kept unchanged. Install with the command shown. |
++| `lossy needs Pillow` | `lossy` / `--strip-metadata` need Pillow; without it images are kept unchanged. Run `arcager --install-deps`. |
+ | `already-packed Arcager file` | The input is already a package. Use `-u` to unpack it first. |
+ 
+-## Checking your setup: `-V`
++## Checking and fixing your setup: `-V` and `--install-deps`
+ 
+ `arcager -V` prints the version and what Arcager can use on this machine, including whether
+ **Terser** is installed and which version:
+ 
+ ```text
+-arcager 4.2.0
++arcager 4.3.0
+   Python        3.12.3  (/usr/bin/python3)
+   cryptography  46.0.6  (required, encryption)
+-  Terser        5.51.2  (/usr/local/bin/terser)
+-  Brotli        1.2.0  (optional, for -c brotli)
+-  Pillow        12.1.1  (optional, for lossy / --strip-metadata)
++  Terser        5.51.2  (/usr/local/bin/terser)  (only needed to rebuild the built-in loader: scripts/build_runtime.py)
++  Brotli        1.2.0  (for -c brotli)
++  Pillow        12.1.1  (for lossy / --strip-metadata)
+ ```
+ 
+-A missing optional component says what it is for and how to install it. A Terser that is
+-found but cannot report a version is explained too. `python scripts/doctor.py` gives a more
+-detailed report (module paths, Node.js) and works even when Arcager itself cannot start.
++A missing package says what it is for and how to fix it. Terser is never needed to *use*
++Arcager (`--minify` is built in); it only matters to maintainers who edit the loader.
++
++`arcager --install-deps` installs whichever of `cryptography`, `brotli` and `Pillow` is missing
++into the Python that is running Arcager, then exits. It is the only command that installs
++anything, and only because you ran it. If pip refuses, it explains why and what to do:
++
++| pip says | Arcager tells you |
++|---|---|
++| `externally-managed-environment` (an OS-managed Python) | how to create and use a virtual environment |
++| cannot reach the package index | to check your internet connection or proxy |
++| `No module named pip` | to run `python -m ensurepip --upgrade` |
++
++`python scripts/doctor.py` gives a more detailed report (module paths, Node.js) and works even
++when Arcager itself cannot start.
+ 
+ ## Full reference (`arcager --help`)
+ 
+ <!-- BEGIN GENERATED: help -->
+ ```text
+-arcager 4.2.0 — turn an HTML page or a static site into ONE self-unpacking HTML file
++arcager 4.3.0 — turn an HTML page or a static site into ONE self-unpacking HTML file
+ 
+ USAGE
+   arcager [options] PAGE.html...     pack pages            -> packed_PAGE.html
+@@ -290,7 +305,7 @@ PACKING
+                        Visible bundles are available to your page (see arcager.images).
+                        'hidden' stores them as an opaque encrypted payload with its own
+                        password that the page never reads; extract it with -x pack.
+-  -m, --minify [lossy] Shrink Arcager's own loader script (needs: npm install -g terser).
++  -m, --minify [lossy] Use a minified loader script (about 4.5 KB smaller per package; built in).
+                        'lossy' also minifies your HTML (comments/whitespace are removed).
+   -r, --recursive      When an input is a folder, also pack the HTML files in its subfolders.
+   --base-href URL      Insert <base href="URL"> so relative links resolve against URL.
+@@ -355,19 +370,24 @@ OUTPUT LOCATION AND NAMES
+   -o FILE      exact output file (one input only)      -O DIR   output folder
+   --prefix P   prefix for packed file names (default: packed_; unpacked files are unpacked_)
+   -f, --force  overwrite existing files without asking   -v, --verbose  show details
+-  -V, --version  version and which components are installed (incl. Terser)    -h, --help  this text
++  -V, --version  version and which components are installed (incl. Terser)
++  --install-deps install the packages Arcager needs into this Python (pip), then exit
++  -h, --help     this text
+ 
+ EXIT CODES
+   0 success    1 usage error or unreadable input    2 some files failed
+   3 nothing processed (every input skipped, or -x found nothing)    130 interrupted
+ 
+ REQUIREMENTS
+-  Python 3.8+ and the 'cryptography' package (pip install -r requirements.txt): encryption
+-  is part of Arcager itself. Optional extras: Brotli, Pillow, Terser (-V shows what is found).
++  Python 3.8+ and three packages, installed in one step:  pip install -r requirements.txt
++  or simply:  arcager --install-deps  (installs whatever is missing into this Python).
++    cryptography  encryption (-E, hidden bundles)       brotli  -c brotli
++    Pillow        lossy and --strip-metadata
++  -V shows what was found. Nothing else is needed: --minify is built in.
+ 
+ MORE
+   README.md            overview and examples         docs/CLI.md   command reference
+   docs/API.md          window.arcager (images + CSV) docs/ARCHITECTURE.md   internals
+-  Extras: pip install -r requirements-optional.txt            Check your setup: arcager -V
++  Check your setup: arcager -V                                 Fix it: arcager --install-deps
+ ```
+ <!-- END GENERATED: help -->
+diff --git a/docs/README.txt b/docs/README.txt
+index 0de376d..c5091a2 100644
+--- a/docs/README.txt
++++ b/docs/README.txt
+@@ -1,4 +1,4 @@
+-Arcager 4.2 documentation
++Arcager 4.3 documentation
+ ==========================
+ 
+ The public entry point is ../README.md.
+@@ -14,6 +14,9 @@ See TESTING.md for the regression strategy, benchmark philosophy and the
+ current local validation record. Cross-platform execution is covered by the
+ GitHub Actions matrix in ../.github/workflows/ci.yml.
+ 
+-The implementation is intentionally dependency-free for preservation-mode
+-packing. Optional packages are used only for optional capabilities such as
+-AES-GCM, Brotli, image conversion and Terser-based minification.
++Arcager needs Python 3.8+ and three packages, installed in one step
++(python -m pip install -r requirements.txt, or: python arcager.py --install-deps):
++cryptography (encryption), brotli (-c brotli) and Pillow (lossy conversion and
++metadata stripping). Missing packages never produce a silent failure: Arcager
++says which feature needs which package and how to install it. Minification of
++the loader is built in and needs no extra tool.
+diff --git a/docs/RELEASING.md b/docs/RELEASING.md
+index 4bb81cb..d1e1787 100644
+--- a/docs/RELEASING.md
++++ b/docs/RELEASING.md
+@@ -4,7 +4,7 @@
+ 
+ ```python
+ # arcager.py
+-VERSION = "4.2.0"
++VERSION = "4.3.0"
+ ```
+ 
+ That is the only place you ever edit. Everything else follows from it:
+@@ -12,14 +12,15 @@ That is the only place you ever edit. Everything else follows from it:
+ | What | How it follows |
+ |---|---|
+ | `arcager -V` / `--version`, `arcager --help` | read `VERSION` at run time |
+-| Titles such as "Arcager 4.2 architecture" in `README.md` and `docs/` | `python scripts/sync_docs.py` |
++| Titles such as "Arcager 4.3 architecture" in `README.md` and `docs/` | `python scripts/sync_docs.py` |
+ | The resource-type table and the full `--help` text in `docs/CLI.md` and the README | generated by the same command from the program itself |
+ 
+ ### To release a new version
+ 
+ ```bash
+ python scripts/sync_docs.py --set X.Y.Z     # edits VERSION, then updates every doc (X.Y.Z = your new version)
+-python scripts/run_tests.py                 # includes a check that the docs are in sync
++python scripts/build_runtime.py             # ONLY if you edited the loader (JS_RUNTIME); needs Terser
++python scripts/run_tests.py                 # includes checks that the docs and the built-in loader are in sync
+ # then add a section for the new version at the top of CHANGELOG.md (by hand)
+ ```
+ 
+diff --git a/docs/TESTING.md b/docs/TESTING.md
+index 77e3500..56bd0c6 100644
+--- a/docs/TESTING.md
++++ b/docs/TESTING.md
+@@ -1,4 +1,4 @@
+-# Arcager 4.2 testing
++# Arcager 4.3 testing
+ 
+ ## Local regression suite
+ 
+@@ -45,7 +45,7 @@ GitHub Actions runs the automated suite on:
+ - macOS;
+ - Windows.
+ 
+-The CI workflow installs optional packages required by the regression corpus (`cryptography`, `brotli`, `Pillow`) so that optional capabilities are exercised rather than merely imported conditionally.
++The regression corpus needs `cryptography`, `brotli` and `Pillow`, all of which come from `requirements.txt`, so the optional capabilities are exercised rather than merely imported conditionally.
+ 
+ This local environment is Linux. It does not execute macOS/Windows binaries, Safari/WebKit, Firefox, or Brave. Those are therefore not claimed as locally executed validation results.
+ 
+@@ -178,7 +178,7 @@ The standard regression suite intentionally excludes these slower fixture tests
+ ## Running the tests
+ 
+ ```bash
+-python -m pip install -r requirements-dev.txt     # once: pytest (and the core requirements)
++python -m pip install -r requirements-dev.txt     # once: pytest plus requirements.txt
+ python scripts/run_tests.py                       # normal tests, ends with PASSED or FAILED
+ python scripts/run_tests.py --all                 # plus the slower benchmark-corpus tests
+ python scripts/run_tests.py -k extract            # a subset by name
+@@ -195,3 +195,18 @@ python scripts/run_tests.py --all
+ ```
+ 
+ To keep it complete in the repository, add the folder with `git add` from the command line rather than the web upload.
++
++## Line endings and the fixtures
++
++`.gitattributes` keeps text files LF on every machine and marks `benchmarks/fixtures/**` as `-text` (never converted). This matters on Windows: with Git's `autocrlf=true`, a checkout without it rewrites the fixtures' line endings, which changes their bytes and fails every digest check (25 failures in total). If your repository already contains CRLF-converted text files, run `git add --renormalize .` once after adding `.gitattributes` and commit the result.
++
++## After editing the loader
++
++If you change `JS_RUNTIME` in `arcager.py`, rebuild the embedded minified copy (this is the only task that needs Terser: `npm install -g terser`):
++
++```bash
++python scripts/build_runtime.py
++python scripts/run_tests.py
++```
++
++`test_embedded_minified_loader_is_current_for_both_variants` fails with that instruction if you forget.
+diff --git a/requirements-optional.txt b/requirements-optional.txt
+deleted file mode 100644
+index aab4202..0000000
+--- a/requirements-optional.txt
++++ /dev/null
+@@ -1,3 +0,0 @@
+-# Optional extras (see README "Installation"). Install with: python -m pip install -r requirements-optional.txt
+-brotli
+-Pillow
+diff --git a/requirements.txt b/requirements.txt
+index eb89655..105fa7c 100644
+--- a/requirements.txt
++++ b/requirements.txt
+@@ -1,2 +1,5 @@
+-# Core requirement: encryption is built into Arcager.
+-cryptography
++# Everything Arcager needs. One command installs it all:
++#   python -m pip install -r requirements.txt     (or: python arcager.py --install-deps)
++cryptography   # encryption (-E, hidden bundles)
++brotli         # -c brotli
++Pillow         # lossy and --strip-metadata
+diff --git a/scripts/build_runtime.py b/scripts/build_runtime.py
+new file mode 100644
+index 0000000..5ee9ce4
+--- /dev/null
++++ b/scripts/build_runtime.py
+@@ -0,0 +1,94 @@
++#!/usr/bin/env python3
++"""Rebuild the minified loader that is embedded in arcager.py.   (Maintainers only.)
++
++Users never need this: `arcager --minify` uses the minified loader that ships inside
++arcager.py, so it works without Terser. Run this script after you EDIT the loader
++(JS_RUNTIME in arcager.py), which needs Terser:  npm install -g terser
++
++    python scripts/build_runtime.py           rebuild and write the block into arcager.py
++    python scripts/build_runtime.py --check   change nothing; exit 1 if the embedded copy is stale
++
++The embedded copy carries the SHA-256 of the loader source it was built from. If the
++source changes and this script is not re-run, Arcager notices (it never ships a stale
++copy) and the test-suite fails with a reminder.
++"""
++from __future__ import annotations
++
++import argparse
++import hashlib
++import importlib.util
++import re
++import shutil
++import subprocess
++import sys
++import tempfile
++from pathlib import Path
++
++ROOT = Path(__file__).resolve().parents[1]
++ARCAGER = ROOT / "arcager.py"
++BLOCK = re.compile(r"(# BEGIN GENERATED: runtime-min[^\n]*\n)(.*?)(# END GENERATED: runtime-min)", re.S)
++TERSER_ARGS = ["--compress", "passes=2,unsafe_arrows=true,toplevel=true", "--mangle", "toplevel"]
++
++
++def load():
++    spec = importlib.util.spec_from_file_location("arcager_build_rt", ARCAGER)
++    mod = importlib.util.module_from_spec(spec)
++    sys.modules["arcager_build_rt"] = mod
++    spec.loader.exec_module(mod)
++    return mod
++
++
++def terser(js: str) -> str:
++    exe = shutil.which("terser")
++    if not exe:
++        raise SystemExit("error: Terser is required to rebuild the loader (npm install -g terser). "
++                         "Users do not need it: arcager --minify works without it.")
++    r = subprocess.run([exe, *TERSER_ARGS], input=js.encode("utf-8"), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
++    if r.returncode != 0:
++        raise SystemExit("error: Terser failed:\n" + r.stderr.decode("utf-8", "replace"))
++    return r.stdout.decode("utf-8")
++
++
++def syntax_check(js: str, label: str) -> None:
++    node = shutil.which("node")
++    if not node:
++        print(f"  (node not found: skipped the syntax check of the {label} loader)")
++        return
++    with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False, encoding="utf-8") as f:
++        f.write(js)
++    r = subprocess.run([node, "--check", f.name], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
++    Path(f.name).unlink(missing_ok=True)
++    if r.returncode != 0:
++        raise SystemExit(f"error: the minified {label} loader is not valid JavaScript:\n" + r.stderr.decode("utf-8", "replace"))
++
++
++def main() -> int:
++    ap = argparse.ArgumentParser(description="Rebuild the minified loader embedded in arcager.py (maintainers only).")
++    ap.add_argument("--check", action="store_true", help="only report whether the embedded copy is current")
++    ns = ap.parse_args()
++    mod = load()
++    current = mod.runtime_is_prebuilt()
++    if ns.check:
++        if current:
++            print("The embedded minified loader is up to date.")
++            return 0
++        print("The embedded minified loader is OUT OF DATE.\nFix: python scripts/build_runtime.py   (needs Terser)", file=sys.stderr)
++        return 1
++    digest = hashlib.sha256(mod.JS_RUNTIME.encode("utf-8")).hexdigest()
++    built = {}
++    for encrypted, label in ((False, "plain"), (True, "encrypted")):
++        built[encrypted] = terser(mod.runtime_source(encrypted))
++        syntax_check(built[encrypted], label)
++        print(f"  {label:9} loader: {len(mod.runtime_source(encrypted).encode())} -> {len(built[encrypted].encode())} bytes")
++    body = (f'RUNTIME_MIN_SOURCE_SHA256 = "{digest}"\n'
++            f"RUNTIME_MIN = {{\n    False: {built[False]!r},\n    True: {built[True]!r},\n}}\n")
++    text = ARCAGER.read_text(encoding="utf-8")
++    if not BLOCK.search(text):
++        raise SystemExit("error: the 'GENERATED: runtime-min' markers are missing from arcager.py")
++    ARCAGER.write_text(BLOCK.sub(lambda m: m.group(1) + body + m.group(3), text, count=1), encoding="utf-8")
++    print("Updated arcager.py. Run the tests: python scripts/run_tests.py")
++    return 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/scripts/doctor.py b/scripts/doctor.py
+index 1587bc8..fc72175 100644
+--- a/scripts/doctor.py
++++ b/scripts/doctor.py
+@@ -13,8 +13,8 @@ import shutil
+ import subprocess
+ import sys
+ 
+-CORE_MODULES = ("cryptography",)      # required: encryption is part of Arcager itself
+-OPTIONAL_MODULES = ("brotli", "PIL")
++CORE_MODULES = ("cryptography", "brotli", "PIL")   # all installed by: pip install -r requirements.txt
++OPTIONAL_MODULES = ()
+ MODULES = CORE_MODULES + OPTIONAL_MODULES
+ 
+ 
+@@ -41,7 +41,7 @@ def main() -> int:
+     missing = []
+     for name in MODULES:
+         version, path = module_info(name)
+-        role = "required" if name in CORE_MODULES else "optional"
++        role = "core" if name in CORE_MODULES else "optional"
+         if version is None:
+             print(f"{name:18} unavailable ({role})")
+             missing.append(name)
+@@ -57,12 +57,13 @@ def main() -> int:
+         except Exception:
+             terser_version = "  (could not report a version)"
+     print(f"{'node':18} {node or 'unavailable'}")
+-    print(f"{'terser':18} {(terser + terser_version) if terser else 'unavailable (optional: npm install -g terser)'}")
++    print(f"{'terser':18} {(terser + terser_version) if terser else 'unavailable (not needed: --minify is built in; only for rebuilding the loader)'}")
+ 
+     core_missing = [name for name in CORE_MODULES if name in missing]
+     if core_missing:
+-        print("\nMissing REQUIRED component:", ", ".join(core_missing))
+-        print(f"Install it with this same interpreter:  {sys.executable} -m pip install -r requirements.txt")
++        print("\nMissing component(s):", ", ".join(core_missing))
++        print(f"Install everything in one step with this same interpreter:  {sys.executable} arcager.py --install-deps")
++        print(f"(or by hand: {sys.executable} -m pip install -r requirements.txt)")
+         return 2
+     required = [x.strip() for x in ns.require.split(",") if x.strip()]
+     required_missing = [name for name in required if name in missing]
+diff --git a/tests/test_cli_experience.py b/tests/test_cli_experience.py
+index 9f161c0..ef18163 100644
+--- a/tests/test_cli_experience.py
++++ b/tests/test_cli_experience.py
+@@ -329,7 +329,7 @@ def test_terser_reported_missing_when_not_on_path(tmp_path):
+     import os
+     env = dict(os.environ, PATH=str(tmp_path))     # nothing on PATH
+     out = subprocess.run([sys.executable, str(ARCAGER), "-V"], env=env, text=True, stdout=subprocess.PIPE).stdout
+-    assert re.search(r"Terser\s+not installed", out) and "npm install -g terser" in out
++    assert re.search(r"Terser\s+not installed", out) and "not needed" in out      # --minify is built in
+ 
+ 
+ # ---------------------------------------------------------------- versioning / docs
+@@ -436,7 +436,7 @@ def test_missing_cryptography_stops_every_operation_with_install_instructions(tm
+     r = run_without_cryptography(page, "-O", tmp_path)          # plain packing, no -E
+     assert r.returncode == 1
+     assert "needs the 'cryptography' package" in r.stderr
+-    assert "pip install -r requirements.txt" in r.stderr
++    assert "--install-deps" in r.stderr and "pip install -r requirements.txt" in r.stderr
+     assert not (tmp_path / "packed_p.html").exists()
+ 
+ 
+@@ -446,28 +446,117 @@ def test_help_and_version_still_work_without_cryptography():
+     assert r.returncode == 0 and "NOT AVAILABLE" in r.stdout
+ 
+ 
+-def test_requirements_files_declare_cryptography_as_core():
++def test_one_requirements_file_covers_every_python_feature():
+     core = (ROOT / "requirements.txt").read_text(encoding="utf-8")
+-    optional = (ROOT / "requirements-optional.txt").read_text(encoding="utf-8")
+-    assert re.search(r"^cryptography", core, re.M)
+-    assert not re.search(r"^cryptography", optional, re.M)
++    for pkg in ("cryptography", "brotli", "Pillow"):
++        assert re.search(rf"^{pkg}\b", core, re.M | re.I), pkg
++    assert not (ROOT / "requirements-optional.txt").exists(), "one install step: no separate optional file"
+ 
+ 
+ # ---------------------------------------------------------------- dark loader
+ 
+-def test_loader_shell_is_dark_and_uses_no_native_dialogs(tmp_path):
++def pack_page(tmp_path, *extra):
+     page = tmp_path / "p.html"
+     page.write_text("<!doctype html><p>x</p>", encoding="utf-8")
+-    assert run_arcager("-f", page, "-O", tmp_path).returncode == 0
+-    text = (tmp_path / "packed_p.html").read_text(encoding="utf-8")
++    r = run_arcager("-f", page, "-O", tmp_path, *extra)
++    assert r.returncode == 0, r.stderr
++    return (tmp_path / "packed_p.html").read_text(encoding="utf-8"), r
++
++
++def test_loader_shell_is_dark_and_uses_no_native_dialogs(tmp_path):
++    text, _ = pack_page(tmp_path, "-E", "--password", "pw")
+     shell = text.split('<script type="application/octet-stream"')[0]
+     assert 'name="color-scheme" content="dark"' in shell
+     assert "background:#0f1115" in shell
+     assert not re.search(r"#f{3,6}\b|#f7f7f7|rgba\(247", shell, re.I), "no bright backgrounds in the loader"
+     runtime = text.split("<script>")[-1]
+-    assert "prompt(" in runtime and "askPassword" in runtime      # prompt() only as a no-form fallback
+-    assert "alert(" not in runtime                                # no native alert for wrong passwords
+-    assert 'id="__pwf"' in shell and "hidden" in shell            # in-page password form
++    assert "askPassword" in runtime and "alert(" not in runtime   # in-page form, no native alert
++    assert 'id="__pwf"' in shell
++
++
++def test_plain_packages_carry_no_password_or_crypto_code(tmp_path):
++    plain, _ = pack_page(tmp_path)
++    for word in ("askPassword", "keyFromPassword", "AES-GCM", "Unlock", "@ENC", "#__pw{"):
++        assert word not in plain, word
++    enc, _ = pack_page(tmp_path, "-E", "--password", "pw")
++    for word in ("askPassword", "keyFromPassword", "AES-GCM", "Unlock"):
++        assert word in enc, word
++    assert "@ENC" not in enc                                        # markers never leak into output
++    assert len(plain) < len(enc)
++
++
++def test_plain_loader_is_not_bigger_than_the_original_4_0_loader():
++    """The dark theme must not cost plain packages bytes (4.0.1 shell+loader was about 17.4 KB)."""
++    mod = load_module("arcager_mod_size")
++    plain = len(mod.shell_html(b"x", title="p").encode("utf-8"))
++    assert plain < 17500, plain
++
++
++# ---------------------------------------------------------------- --minify needs no extra tools
++
++def test_minify_works_without_terser_and_shrinks_the_loader(tmp_path):
++    import os
++    page = tmp_path / "p.html"
++    page.write_text("<!doctype html><p>x</p>", encoding="utf-8")
++    env = dict(os.environ, PATH=str(tmp_path / "nothing"))         # no terser, no node, nothing
++    def pack(*extra):
++        d = tmp_path / ("m" if extra else "n")
++        r = subprocess.run([sys.executable, str(ARCAGER), "-f", str(page), "-O", str(d), *extra], env=env,
++                           text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
++        assert r.returncode == 0, r.stderr
++        assert r.stderr.strip() == "", r.stderr                     # silent: nothing to warn about
++        return (d / "packed_p.html").stat().st_size
++    assert pack("-m") < pack() - 3000                               # about 4.5 KB smaller
++
++
++def test_embedded_minified_loader_is_current_for_both_variants():
++    mod = load_module("arcager_mod_min")
++    assert mod.runtime_is_prebuilt(), "loader source changed: run  python scripts/build_runtime.py  (needs Terser)"
++    for encrypted in (False, True):
++        assert len(mod.RUNTIME_MIN[encrypted]) < len(mod.runtime_source(encrypted)) * 0.8
++        assert "@ENC" not in mod.RUNTIME_MIN[encrypted]
++
++
++@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js not installed")
++def test_embedded_minified_loader_is_valid_javascript(tmp_path):
++    mod = load_module("arcager_mod_min2")
++    for encrypted in (False, True):
++        f = tmp_path / f"l{int(encrypted)}.js"
++        f.write_text(mod.RUNTIME_MIN[encrypted], encoding="utf-8")
++        r = subprocess.run(["node", "--check", str(f)], stderr=subprocess.PIPE, text=True)
++        assert r.returncode == 0, r.stderr
++
++
++# ---------------------------------------------------------------- --install-deps
++
++def test_install_deps_says_so_when_everything_is_present():
++    r = run_arcager("--install-deps")
++    assert r.returncode == 0 and "already installed" in r.stdout
++
++
++@pytest.mark.parametrize("pip_output, needle", [
++    ("error: externally-managed-environment", "python3 -m venv .venv"),
++    ("ERROR: No matching distribution found for brotli", "internet connection"),
++    ("/usr/bin/python3: No module named pip", "ensurepip"),
++    ("something unexpected", "by hand"),
++])
++def test_install_deps_failures_tell_the_user_what_to_do(pip_output, needle, capsys, monkeypatch):
++    mod = load_module("arcager_mod_inst")
++    monkeypatch.setattr(mod, "_importable", lambda name: False)
++    class Result:
++        returncode = 1
++        stdout = pip_output
++    monkeypatch.setattr(mod.subprocess, "run", lambda *a, **k: Result())
++    assert mod.install_dependencies() == 1
++    assert needle in capsys.readouterr().err
++
++
++# ---------------------------------------------------------------- repository hygiene
++
++def test_gitattributes_keeps_fixtures_byte_exact_and_text_lf():
++    attrs = (ROOT / ".gitattributes").read_text(encoding="utf-8")
++    assert re.search(r"^\* text=auto eol=lf", attrs, re.M)
++    assert re.search(r"^benchmarks/fixtures/\*\* -text", attrs, re.M)
+ 
+ 
+ # ---------------------------------------------------------------- xml and mjs are docs
