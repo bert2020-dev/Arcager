@@ -1,3 +1,0 @@
-# Optional extras (see README "Installation"). Install with: python -m pip install -r requirements-optional.txt
-brotli
-Pillow
